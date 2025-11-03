@@ -101,6 +101,8 @@ where
             "to_finalize must be <= total"
         );
 
+        assert_eq!(commits.len(), config.total);
+
         // Sample without replacement: shuffle 0..total and take first `to_finalize`
         let mut idxs: Vec<usize> = (0..config.total).collect();
         // Fisher-Yates with unbiased rng
