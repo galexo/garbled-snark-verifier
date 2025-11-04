@@ -80,14 +80,19 @@ jobs:
 
       - name: Setup SP1 toolchain
         run: |
+          export PATH="$HOME/.sp1/bin:$PATH"
           sp1up
           rustc +succinct --version
 
       - name: Build (prime SP1 assets, release)
-        run: cargo build --locked --release --workspace --all-targets --all-features
+        run: |
+          export PATH="$HOME/.sp1/bin:$PATH"
+          cargo build --locked --release --workspace --all-targets --all-features
 
       - name: Run clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        run: |
+          export PATH="$HOME/.sp1/bin:$PATH"
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   build-and-test:
     name: build-and-test
@@ -133,11 +138,16 @@ jobs:
 
       - name: Setup SP1 toolchain
         run: |
+          export PATH="$HOME/.sp1/bin:$PATH"
           sp1up
           rustc +succinct --version
 
       - name: Build
-        run: cargo build --locked --workspace --all-targets
+        run: |
+          export PATH="$HOME/.sp1/bin:$PATH"
+          cargo build --locked --workspace --all-targets
 
       - name: Test
-        run: cargo test --locked --workspace --all-targets -- --nocapture
+        run: |
+          export PATH="$HOME/.sp1/bin:$PATH"
+          cargo test --locked --workspace --all-targets -- --nocapture
