@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Instant};
 
-use rkyv::util::AlignedVec;
+use bincode::config;
 use sp1_core_executor::SP1ContextBuilder;
 use sp1_core_machine::io::SP1Stdin;
 use sp1_prover::{
@@ -33,25 +33,26 @@ pub struct SolderingProof {
 }
 
 /// Serializes the wires input into the format expected by the SP1 guest.
-pub fn serialize_wires_input(input: &types::WiresInput) -> Result<AlignedVec, rkyv::rancor::Error> {
-    rkyv::to_bytes::<rkyv::rancor::Error>(input)
+pub fn serialize_wires_input(
+    input: &types::WiresInput,
+) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::encode_to_vec(input, config::standard())
 }
 
 /// Serializes the soldering public parameters.
 pub fn serialize_public_params(
     params: &types::SolderedLabelsData,
-) -> Result<AlignedVec, rkyv::rancor::Error> {
-    rkyv::to_bytes::<rkyv::rancor::Error>(params)
+) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::encode_to_vec(params, config::standard())
 }
 
 /// Deserializes the soldering public parameters emitted by the SP1 guest.
 pub fn deserialize_public_params(
     bytes: &[u8],
-) -> Result<types::SolderedLabelsData, rkyv::rancor::Error> {
-    // Safety: The SP1 program writes out a valid `SolderedLabelsData` archive and
-    // we only call this on buffers produced by that program or in tests that
-    // mirror its serialization logic.
-    unsafe { rkyv::from_bytes_unchecked::<types::SolderedLabelsData, rkyv::rancor::Error>(bytes) }
+) -> Result<types::SolderedLabelsData, bincode::error::DecodeError> {
+    let (decoded, _len) =
+        bincode::decode_from_slice::<types::SolderedLabelsData, _>(bytes, config::standard())?;
+    Ok(decoded)
 }
 
 fn groth16_artifacts_dir() -> PathBuf {
@@ -81,7 +82,7 @@ pub fn prove_soldering(instances: Vec<Vec<GarbledWire>>, nonce: u128) -> Solderi
     let input_bytes = serialize_wires_input(&input).expect("failed to serialize wires input");
 
     let mut stdin = SP1Stdin::new();
-    stdin.write(&input_bytes.as_slice()); // example input
+    stdin.write(&input_bytes); // example input
 
     // 3. Create proving/verification keys.
     let (_pk, pk_device, program, vk) = prover.setup(elf());
@@ -161,7 +162,7 @@ pub fn verify_soldering(
         .verify_groth16_bn254(
             &proof,
             &vk,
-            &SP1PublicValues::from(input_bytes.as_slice()),
+            &SP1PublicValues::from(&input_bytes[..]),
             &artifacts,
         )
         .unwrap();
@@ -270,7 +271,7 @@ mod tests {
             serialize_wires_input(&input).expect("failed to serialize wires input for core test");
 
         let mut stdin = SP1Stdin::new();
-        stdin.write(&input_bytes.as_slice());
+        stdin.write(&input_bytes);
 
         let prover = SP1Prover::<CpuProverComponents>::new();
         let (_pk, pk_device, program, _vk) = prover.setup(elf());
@@ -294,7 +295,7 @@ mod tests {
 
         let reserialized =
             serialize_public_params(&recovered).expect("failed to reserialize public params");
-        let decoded = deserialize_public_params(reserialized.as_slice())
+        let decoded = deserialize_public_params(&reserialized)
             .expect("failed to deserialize reserialized params");
         assert_eq!(
             decoded, recovered,
@@ -352,7 +353,7 @@ mod tests {
             serialize_wires_input(&input).expect("failed to serialize wires input for execution");
 
         let mut stdin = SP1Stdin::new();
-        stdin.write_slice(input_bytes.as_slice());
+        stdin.write_slice(&input_bytes);
 
         let (public_values, report) =
             execute_only(elf(), &stdin).expect("guest execution should succeed");

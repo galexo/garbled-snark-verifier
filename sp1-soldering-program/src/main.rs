@@ -3,31 +3,26 @@ sp1_zkvm::entrypoint!(main);
 
 use core::ops::BitXor;
 
-use rkyv::rancor;
+use bincode::config;
 use sha2::{Digest, Sha256};
 
 pub mod types;
 pub use types::*;
 
 #[inline(always)]
-fn hash_label_into(hasher: &mut Sha256, label: &rkyv::rend::u128_le, out: &mut [u8; 32]) {
-    hasher.update(label.to_native().to_be_bytes().as_slice());
+fn hash_label_into(hasher: &mut Sha256, label: u128, out: &mut [u8; 32]) {
+    hasher.update(label.to_be_bytes().as_slice());
     hasher.finalize_into_reset(out.into());
 }
 
 pub fn main() {
     let input_bytes = sp1_zkvm::io::read_vec();
 
-    // Safety:
-    //
-    // Crate that is used under the hood for consistency checking - does not work in sp1 env.
-    // Outside for consistency of ser/deser, the same logic code is executed for checking
-    // correctness.
-    let archived = unsafe { rkyv::access_unchecked::<ArchivedWiresInput>(input_bytes.as_slice()) };
+    let (input, _len): (WiresInput, usize) = bincode::decode_from_slice(&input_bytes, config::standard()).unwrap();
 
-    let (base_instance, remaining) = archived.instances_wires.split_first().unwrap();
+    let (base_instance, remaining) = input.instances_wires.split_first().unwrap();
     let soldered_instances_count = remaining.len();
-    let nonce = archived.nonce;
+    let nonce = input.nonce;
 
     let wires_count = base_instance.len();
 
@@ -47,23 +42,21 @@ pub fn main() {
         let base_wire = &base_instance[wire_id];
 
         // Compute base commitments
-        hash_label_into(&mut hasher, &base_wire.0, &mut base_commitment[wire_id].0);
-        hash_label_into(&mut hasher, &base_wire.1, &mut base_commitment[wire_id].1);
+        hash_label_into(&mut hasher, base_wire.0, &mut base_commitment[wire_id].0);
+        hash_label_into(&mut hasher, base_wire.1, &mut base_commitment[wire_id].1);
 
         // Compute base nonce commitments in the same loop
         let label0_with_nonce = base_wire.0.bitxor(nonce);
-        let label0_le = rkyv::rend::u128_le::from_native(label0_with_nonce);
         hash_label_into(
             &mut hasher,
-            &label0_le,
+            label0_with_nonce,
             &mut base_nonce_commitment[wire_id].0,
         );
 
         let label1_with_nonce = base_wire.1.bitxor(nonce);
-        let label1_le = rkyv::rend::u128_le::from_native(label1_with_nonce);
         hash_label_into(
             &mut hasher,
-            &label1_le,
+            label1_with_nonce,
             &mut base_nonce_commitment[wire_id].1,
         );
 
@@ -74,12 +67,12 @@ pub fn main() {
             // Hash each label individually like base instance, reusing the hasher
             hash_label_into(
                 &mut hasher,
-                &instance_wire.0,
+                instance_wire.0,
                 &mut commitments[idx][wire_id].0,
             );
             hash_label_into(
                 &mut hasher,
-                &instance_wire.1,
+                instance_wire.1,
                 &mut commitments[idx][wire_id].1,
             );
 
@@ -94,8 +87,9 @@ pub fn main() {
         base_commitment,
         base_nonce_commitment,
         commitments,
-        nonce: nonce.to_native(),
+        nonce,
     };
 
-    sp1_zkvm::io::commit_slice(rkyv::to_bytes::<rancor::Error>(&data).unwrap().as_slice());
+    let output_bytes = bincode::encode_to_vec(&data, config::standard()).unwrap();
+    sp1_zkvm::io::commit_slice(&output_bytes);
 }
