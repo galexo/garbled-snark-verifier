@@ -45,9 +45,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust 1.90 (with clippy)
+        uses: actions-rs/toolchain@v1
         with:
-          toolchain: "1.90.0"
+          profile: minimal
+          toolchain: 1.90.0
+          override: true
           components: clippy
 
       - name: Install SP1 system dependencies
