@@ -14,7 +14,12 @@ mod types;
 
 pub use types::{Sha256Commit, SolderedLabelsData as SolderedLabels};
 
-use crate::{GarbledWire, S, circuit::CircuitInput};
+use crate::{GarbledWire, S, Sha256LabelCommitHasher, circuit::CircuitInput, commit_label_with};
+
+/// Hash a label to create a SHA256 commitment using the standard label commit hasher
+pub fn hash_label(label: u128) -> Sha256Commit {
+    commit_label_with::<Sha256LabelCommitHasher>(S::from_u128(label))
+}
 
 /// Trait for inputs that can be soldered with deltas to create derived instances
 pub trait SolderInput: CircuitInput {
@@ -36,22 +41,28 @@ pub struct SolderingProof {
 pub fn serialize_wires_input(
     input: &types::WiresInput,
 ) -> Result<Vec<u8>, bincode::error::EncodeError> {
-    bincode::encode_to_vec(input, config::standard())
+    // Use fixed-int encoding to support u128 in SP1
+    let config = config::standard().with_fixed_int_encoding();
+    bincode::encode_to_vec(input, config)
 }
 
 /// Serializes the soldering public parameters.
 pub fn serialize_public_params(
     params: &types::SolderedLabelsData,
 ) -> Result<Vec<u8>, bincode::error::EncodeError> {
-    bincode::encode_to_vec(params, config::standard())
+    // Use fixed-int encoding to support u128 in SP1
+    let config = config::standard().with_fixed_int_encoding();
+    bincode::encode_to_vec(params, config)
 }
 
 /// Deserializes the soldering public parameters emitted by the SP1 guest.
 pub fn deserialize_public_params(
     bytes: &[u8],
 ) -> Result<types::SolderedLabelsData, bincode::error::DecodeError> {
+    // Use fixed-int encoding to support u128 in SP1
+    let config = config::standard().with_fixed_int_encoding();
     let (decoded, _len) =
-        bincode::decode_from_slice::<types::SolderedLabelsData, _>(bytes, config::standard())?;
+        bincode::decode_from_slice::<types::SolderedLabelsData, _>(bytes, config)?;
     Ok(decoded)
 }
 
@@ -82,7 +93,7 @@ pub fn prove_soldering(instances: Vec<Vec<GarbledWire>>, nonce: u128) -> Solderi
     let input_bytes = serialize_wires_input(&input).expect("failed to serialize wires input");
 
     let mut stdin = SP1Stdin::new();
-    stdin.write(&input_bytes); // example input
+    stdin.write_slice(&input_bytes);
 
     // 3. Create proving/verification keys.
     let (_pk, pk_device, program, vk) = prover.setup(elf());
@@ -184,17 +195,6 @@ mod tests {
     use super::*;
     use crate::S;
 
-    /// Hash a label to create a commitment (internal helper for tests)
-    fn hash_label(label: u128) -> Sha256Commit {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(label.to_be_bytes());
-        let result = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&result);
-        bytes
-    }
-
     /// Build the expected public parameters for a set of raw wire labels.
     fn build_expected_public_params(
         raw_instances: &[Vec<(u128, u128)>],
@@ -272,7 +272,7 @@ mod tests {
             serialize_wires_input(&input).expect("failed to serialize wires input for core test");
 
         let mut stdin = SP1Stdin::new();
-        stdin.write(&input_bytes);
+        stdin.write_slice(&input_bytes);
 
         let prover = SP1Prover::<CpuProverComponents>::new();
         let (_pk, pk_device, program, _vk) = prover.setup(elf());

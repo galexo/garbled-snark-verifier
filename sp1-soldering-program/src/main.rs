@@ -3,7 +3,7 @@ sp1_zkvm::entrypoint!(main);
 
 use core::ops::BitXor;
 
-use bincode::config;
+use bincode::{config, config::Configuration};
 use sha2::{Digest, Sha256};
 
 pub mod types;
@@ -18,7 +18,9 @@ fn hash_label_into(hasher: &mut Sha256, label: u128, out: &mut [u8; 32]) {
 pub fn main() {
     let input_bytes = sp1_zkvm::io::read_vec();
 
-    let (input, _len): (WiresInput, usize) = bincode::decode_from_slice(&input_bytes, config::standard()).unwrap();
+    // Use fixed-int encoding to support u128 in SP1
+    let config = config::standard().with_fixed_int_encoding();
+    let (input, _len): (WiresInput, usize) = bincode::decode_from_slice(&input_bytes, config).unwrap();
 
     let (base_instance, remaining) = input.instances_wires.split_first().unwrap();
     let soldered_instances_count = remaining.len();
@@ -90,6 +92,8 @@ pub fn main() {
         nonce,
     };
 
-    let output_bytes = bincode::encode_to_vec(&data, config::standard()).unwrap();
+    // Use fixed-int encoding to support u128 in SP1
+    let config = config::standard().with_fixed_int_encoding();
+    let output_bytes = bincode::encode_to_vec(&data, config).unwrap();
     sp1_zkvm::io::commit_slice(&output_bytes);
 }
