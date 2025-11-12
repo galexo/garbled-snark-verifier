@@ -7,9 +7,22 @@
 use std::fs;
 
 #[cfg(feature = "sp1-soldering")]
-use garbled_snark_verifier::sp1_soldering::{hash_label, prove_soldering, verify_soldering};
+use garbled_snark_verifier::sp1_soldering::{
+    Sha256Commit, SolderingProof, hash_label, prove_soldering, verify_soldering,
+};
 use garbled_snark_verifier::{GarbledWire, S};
 use rand::Rng;
+#[cfg(feature = "sp1-soldering")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "sp1-soldering")]
+#[derive(Serialize, Deserialize)]
+struct CommitmentsFile {
+    base_commitment: Vec<(Sha256Commit, Sha256Commit)>,
+    base_nonce_commitment: Vec<(Sha256Commit, Sha256Commit)>,
+    nonce: u128,
+    commitments: Vec<Vec<(Sha256Commit, Sha256Commit)>>,
+}
 
 #[cfg(feature = "sp1-soldering")]
 fn run_prove() {
@@ -79,8 +92,13 @@ fn run_prove() {
     .unwrap();
     fs::write(
         "commitments.json",
-        serde_json::to_string_pretty(&(base_commitment, base_nonce_commitment, nonce, commitments))
-            .unwrap(),
+        serde_json::to_string_pretty(&CommitmentsFile {
+            base_commitment,
+            base_nonce_commitment,
+            nonce,
+            commitments,
+        })
+        .unwrap(),
     )
     .unwrap();
 
@@ -89,18 +107,16 @@ fn run_prove() {
 
 #[cfg(feature = "sp1-soldering")]
 fn run_verify() {
-    use garbled_snark_verifier::sp1_soldering::{Sha256Commit, SolderingProof};
-
     println!("Loading proof...");
 
     let groth16_proof = serde_json::from_str(&fs::read_to_string("proof.json").unwrap()).unwrap();
     let deltas = serde_json::from_str(&fs::read_to_string("deltas.json").unwrap()).unwrap();
-    let (base_commitment, base_nonce_commitment, nonce, commitments): (
-        Vec<(Sha256Commit, Sha256Commit)>,
-        Vec<(Sha256Commit, Sha256Commit)>,
-        u128,
-        Vec<Vec<(Sha256Commit, Sha256Commit)>>,
-    ) = serde_json::from_str(&fs::read_to_string("commitments.json").unwrap()).unwrap();
+    let CommitmentsFile {
+        base_commitment,
+        base_nonce_commitment,
+        nonce,
+        commitments,
+    } = serde_json::from_str(&fs::read_to_string("commitments.json").unwrap()).unwrap();
 
     let proof = SolderingProof {
         proof: groth16_proof,

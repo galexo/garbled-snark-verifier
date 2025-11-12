@@ -114,6 +114,19 @@ impl Garbler {
     }
 }
 
+#[cfg(feature = "test-utils")]
+impl Garbler {
+    pub fn from_raw_inner(
+        inner: generic::Garbler<garbled_groth16::GarblerCompressedInput>,
+    ) -> Self {
+        Self { inner }
+    }
+
+    pub fn into_raw_inner(self) -> generic::Garbler<garbled_groth16::GarblerCompressedInput> {
+        self.inner
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "HHasher: LabelCommitHasher")]
 pub struct Evaluator<HHasher: LabelCommitHasher = DefaultLabelCommitHasher> {
@@ -190,6 +203,19 @@ impl<H: LabelCommitHasher> Evaluator<H> {
             DEFAULT_CAPACITY,
             garbled_groth16::verify_compressed,
         )
+    }
+}
+
+#[cfg(feature = "test-utils")]
+impl<H: LabelCommitHasher> Evaluator<H> {
+    pub fn from_raw_inner(
+        inner: generic::Evaluator<garbled_groth16::GarblerCompressedInput, H>,
+    ) -> Self {
+        Self { inner }
+    }
+
+    pub fn into_raw_inner(self) -> generic::Evaluator<garbled_groth16::GarblerCompressedInput, H> {
+        self.inner
     }
 }
 

@@ -428,3 +428,96 @@ where
         self.instances.get(index).map(|gw| &gw.output_wire_values)
     }
 }
+
+#[cfg(feature = "test-utils")]
+mod test_utils {
+    use super::*;
+    use crate::circuit::CircuitInput;
+
+    #[derive(Clone, Debug)]
+    pub struct CommitPhaseOneRawParts<H: Clone + Copy> {
+        pub ciphertext_hash: CiphertextCommit,
+        pub input_commitments: Vec<LabelCommit<H>>,
+        pub output_label1_commit: H,
+        pub output_label0_commit: H,
+        pub true_constant: u128,
+        pub false_constant: u128,
+    }
+
+    impl<H: LabelCommitHasher> CommitPhaseOne<H> {
+        /// Construct a commit payload directly from raw components for testing helpers.
+        pub fn from_raw_parts(parts: CommitPhaseOneRawParts<H::Output>) -> Self {
+            Self {
+                ciphertext_hash: parts.ciphertext_hash,
+                input_commitments: parts.input_commitments,
+                output_label1_commit: parts.output_label1_commit,
+                output_label0_commit: parts.output_label0_commit,
+                true_constant: parts.true_constant,
+                false_constant: parts.false_constant,
+            }
+        }
+
+        pub fn into_raw_parts(self) -> CommitPhaseOneRawParts<H::Output> {
+            CommitPhaseOneRawParts {
+                ciphertext_hash: self.ciphertext_hash,
+                input_commitments: self.input_commitments,
+                output_label1_commit: self.output_label1_commit,
+                output_label0_commit: self.output_label0_commit,
+                true_constant: self.true_constant,
+                false_constant: self.false_constant,
+            }
+        }
+    }
+
+    impl<H: LabelCommitHasher> CommitPhaseTwo<H> {
+        pub fn from_raw_parts(input_commitments: Vec<LabelCommit<H::Output>>) -> Self {
+            Self { input_commitments }
+        }
+
+        pub fn into_raw_parts(self) -> Vec<LabelCommit<H::Output>> {
+            self.input_commitments
+        }
+    }
+
+    impl<I> Garbler<I>
+    where
+        I: CircuitInput + Clone,
+    {
+        pub fn from_raw_parts(
+            stage: GarblerStage,
+            instances: Vec<GarbledInstance>,
+            config: Config<I>,
+            live_capacity: usize,
+            nonce: Option<S>,
+        ) -> Self {
+            Self {
+                stage,
+                instances,
+                config,
+                live_capacity,
+                nonce,
+            }
+        }
+
+        pub fn into_raw_parts(
+            self,
+        ) -> (
+            GarblerStage,
+            Vec<GarbledInstance>,
+            Config<I>,
+            usize,
+            Option<S>,
+        ) {
+            (
+                self.stage,
+                self.instances,
+                self.config,
+                self.live_capacity,
+                self.nonce,
+            )
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub use test_utils::*;

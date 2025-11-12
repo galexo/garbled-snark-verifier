@@ -34,7 +34,7 @@ use crate::{
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "H: LabelCommitHasher")]
-enum Stage<H: LabelCommitHasher> {
+pub enum Stage<H: LabelCommitHasher> {
     #[default]
     Empty,
     Created(Vec<CommitPhaseOne<H>>),
@@ -271,6 +271,86 @@ where
         Ok(())
     }
 }
+
+#[cfg(feature = "test-utils")]
+mod test_utils {
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+
+    impl<I, H> Evaluator<I, H>
+    where
+        I: CircuitInput + Clone + Serialize + DeserializeOwned,
+        H: LabelCommitHasher,
+    {
+        pub fn from_raw_parts(
+            config: Config<I>,
+            nonce: S,
+            to_finalize: Box<[usize]>,
+            stage: Stage<H>,
+        ) -> Self {
+            Self {
+                config,
+                nonce,
+                to_finalize,
+                stage,
+            }
+        }
+
+        pub fn into_raw_parts(self) -> (Config<I>, S, Box<[usize]>, Stage<H>) {
+            (self.config, self.nonce, self.to_finalize, self.stage)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(bound = "I: CircuitInput + Clone + Serialize + DeserializeOwned, H: LabelCommitHasher")]
+    pub struct EvaluatorRawParts<I, H>
+    where
+        I: CircuitInput + Clone + Serialize + DeserializeOwned,
+        H: LabelCommitHasher,
+    {
+        pub config: Config<I>,
+        pub nonce: S,
+        pub to_finalize: Box<[usize]>,
+        pub stage: Stage<H>,
+    }
+
+    impl<I, H> From<EvaluatorRawParts<I, H>> for Evaluator<I, H>
+    where
+        I: CircuitInput
+            + Clone
+            + Send
+            + Sync
+            + EncodeInput<GarbleMode<AesNiHasher, AESAccumulatingHash>>
+            + Serialize
+            + DeserializeOwned,
+        <I as CircuitInput>::WireRepr: Send + Sync,
+        H: LabelCommitHasher,
+    {
+        fn from(parts: EvaluatorRawParts<I, H>) -> Self {
+            Self::from_raw_parts(parts.config, parts.nonce, parts.to_finalize, parts.stage)
+        }
+    }
+
+    impl<I, H> From<Evaluator<I, H>> for EvaluatorRawParts<I, H>
+    where
+        I: CircuitInput + Clone + Serialize + DeserializeOwned,
+        H: LabelCommitHasher,
+    {
+        fn from(value: Evaluator<I, H>) -> Self {
+            let (config, nonce, to_finalize, stage) = value.into_raw_parts();
+            Self {
+                config,
+                nonce,
+                to_finalize,
+                stage,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub use test_utils::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EvaluatorCaseInput<I> {
