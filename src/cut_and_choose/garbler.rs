@@ -427,6 +427,58 @@ where
     pub fn output_wire(&self, index: usize) -> Option<&GarbledWire> {
         self.instances.get(index).map(|gw| &gw.output_wire_values)
     }
+
+    /// Returns input wire commitments for the base soldered instance.
+    ///
+    /// Available after `commit_phase_two` and finalized indexes are set (PreparedForEval stage).
+    /// The base instance is the first finalized index.
+    ///
+    /// Returns `None` if not in PreparedForEval stage.
+    pub fn soldered_base_commitment<H: LabelCommitHasher>(
+        &self,
+    ) -> Option<Vec<LabelCommit<H::Output>>> {
+        let GarblerStage::PreparedForEval { indexes_to_eval } = &self.stage else {
+            return None;
+        };
+
+        // Base instance is the first finalized index
+        let base_idx = *indexes_to_eval.first()?;
+        let base_instance = &self.instances[base_idx];
+
+        Some(commit_input_wires::<H>(
+            &base_instance.input_wire_values,
+            self.nonce,
+        ))
+    }
+
+    /// Returns output label commitments (true, false) for all finalized instances.
+    ///
+    /// Available after finalized indexes are set (PreparedForEval stage).
+    /// Returns a vector of tuples where each tuple contains:
+    /// - First element: commitment to the label when output is true
+    /// - Second element: commitment to the label when output is false
+    ///
+    /// Returns `None` if not in PreparedForEval stage.
+    pub fn finalized_output_label_commitment<H: LabelCommitHasher>(
+        &self,
+    ) -> Option<Vec<(H::Output, H::Output)>> {
+        let GarblerStage::PreparedForEval { indexes_to_eval } = &self.stage else {
+            return None;
+        };
+
+        Some(
+            indexes_to_eval
+                .iter()
+                .map(|&idx| {
+                    let instance = &self.instances[idx];
+                    (
+                        commit_output_label1::<H>(&instance.output_wire_values),
+                        commit_output_label0::<H>(&instance.output_wire_values),
+                    )
+                })
+                .collect(),
+        )
+    }
 }
 
 #[cfg(feature = "test-utils")]

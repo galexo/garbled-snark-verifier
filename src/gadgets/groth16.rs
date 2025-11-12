@@ -1064,15 +1064,16 @@ mod tests {
         }
     }
 
-    // Unified small verifier tests across flows
     #[test]
     fn test_small_verify_true_uncompressed() {
         assert!(run_small_verify(VerifyFlow::Uncompressed, 10101, |_| {}));
     }
+
     #[test]
     fn test_small_verify_true_compressed() {
         assert!(run_small_verify(VerifyFlow::Compressed, 20202, |_| {}));
     }
+
     #[test]
     fn test_small_verify_false_bitflip_a_uncompressed() {
         assert!(!run_small_verify(
@@ -1083,12 +1084,14 @@ mod tests {
             }
         ));
     }
+
     #[test]
     fn test_small_verify_false_bitflip_a_compressed() {
         assert!(!run_small_verify(VerifyFlow::Compressed, 40404, |inputs| {
             inputs.a.x += ark_bn254::Fq::ONE;
         }));
     }
+
     #[test]
     fn test_small_verify_false_bitflip_b_uncompressed() {
         assert!(!run_small_verify(
@@ -1099,12 +1102,14 @@ mod tests {
             }
         ));
     }
+
     #[test]
     fn test_small_verify_false_bitflip_b_compressed() {
         assert!(!run_small_verify(VerifyFlow::Compressed, 60606, |inputs| {
             inputs.b.x.c0 += ark_bn254::Fq::ONE;
         }));
     }
+
     #[test]
     fn test_small_verify_false_bitflip_c_uncompressed() {
         assert!(!run_small_verify(
@@ -1115,6 +1120,7 @@ mod tests {
             }
         ));
     }
+
     #[test]
     fn test_small_verify_false_bitflip_c_compressed() {
         assert!(!run_small_verify(VerifyFlow::Compressed, 80808, |inputs| {
