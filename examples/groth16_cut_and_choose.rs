@@ -97,7 +97,6 @@ impl<F: ark::PrimeField> ark::ConstraintSynthesizer<F> for DummyCircuit<F> {
     }
 }
 
-#[cfg(feature = "sp1-soldering")]
 fn main() {
     if !garbled_snark_verifier::hardware_aes_available() {
         eprintln!(
@@ -397,10 +396,5 @@ fn run_evaluator(
 
         eval.run_evaluate_with_soldered_instances(&out_dir, *base_case)
             .expect("soldered evaluate")
-    }
-
-    #[cfg(not(feature = "sp1-soldering"))]
-    {
-        panic!("sp1-soldering feature is required to run this example");
     }
 }

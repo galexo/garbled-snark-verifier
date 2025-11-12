@@ -106,3 +106,7 @@ codegen-units = 1   # maximize inlining decisions
 panic = "abort"
 incremental = false
 strip = "symbols"   # if you don't need debug symbols in release
+
+[[example]]
+name = "groth16_cut_and_choose"
+required-features = ["sp1-soldering"]
