@@ -49,15 +49,8 @@ pub use math::*;
 
 pub use crate::circuit::modes::GarbleMode;
 
-#[cfg(test)]
-pub mod test_utils {
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
-
-    pub fn trng() -> ChaCha20Rng {
-        ChaCha20Rng::seed_from_u64(0)
-    }
-}
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 pub mod cut_and_choose;
 pub mod garbled_groth16;
