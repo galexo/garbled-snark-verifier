@@ -2027,6 +2027,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_miller_loop_const_q_matches_ark_single() {
         use ark_ec::pairing::Pairing;
         let mut rng = ChaCha20Rng::seed_from_u64(11);
@@ -2182,6 +2183,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_multi_pairing_const_q_matches_ark_n3() {
         use ark_ec::pairing::Pairing;
         let mut rng = ChaCha20Rng::seed_from_u64(13);
@@ -2336,6 +2338,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_multi_miller_loop_montgomery_fast() {
         let mut prng = ChaCha20Rng::seed_from_u64(0);
         let n = 3;

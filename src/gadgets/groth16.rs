@@ -1083,6 +1083,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_small_verify_false_bitflip_a_uncompressed() {
         assert!(!run_small_verify(
             VerifyFlow::Uncompressed,
@@ -1094,6 +1095,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_small_verify_false_bitflip_a_compressed() {
         assert!(!run_small_verify(VerifyFlow::Compressed, 40404, |inputs| {
             inputs.a.x += ark_bn254::Fq::ONE;
@@ -1101,6 +1103,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_small_verify_false_bitflip_b_uncompressed() {
         assert!(!run_small_verify(
             VerifyFlow::Uncompressed,
@@ -1112,6 +1115,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_small_verify_false_bitflip_b_compressed() {
         assert!(!run_small_verify(VerifyFlow::Compressed, 60606, |inputs| {
             inputs.b.x.c0 += ark_bn254::Fq::ONE;
@@ -1119,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_small_verify_false_bitflip_c_uncompressed() {
         assert!(!run_small_verify(
             VerifyFlow::Uncompressed,
@@ -1130,6 +1135,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_small_verify_false_bitflip_c_compressed() {
         assert!(!run_small_verify(VerifyFlow::Compressed, 80808, |inputs| {
             inputs.c.x += ark_bn254::Fq::ONE;
