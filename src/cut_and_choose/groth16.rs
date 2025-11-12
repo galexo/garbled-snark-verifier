@@ -221,6 +221,16 @@ impl<H: LabelCommitHasher> Evaluator<H> {
             garbled_groth16::verify_compressed,
         )
     }
+
+    /// Performs regarbling verification for all opened instances.
+    ///
+    /// This is a simplified version of `full_check_commit` that only regarbles
+    /// and verifies opened instances, without checking ciphertext commits for finalized instances.
+    #[allow(clippy::result_unit_err)]
+    pub fn run_regarbling(&mut self, seeds: Vec<(usize, Seed)>) -> Result<(), ()> {
+        self.inner
+            .run_regarbling(seeds, DEFAULT_CAPACITY, garbled_groth16::verify_compressed)
+    }
 }
 
 pub type EvaluatorCaseInput =

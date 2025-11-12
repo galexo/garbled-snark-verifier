@@ -305,6 +305,107 @@ where
 
         Ok(())
     }
+
+    /// Performs regarbling verification for all opened instances.
+    ///
+    /// This method regarbles circuits for all opened instances (those not in `to_finalize`)
+    /// and verifies both phase one and phase two commitments against the provided seeds.
+    ///
+    /// Unlike `full_check_commit`, this method does NOT verify ciphertext commits for
+    /// finalized instances, making it faster when you only need to verify the opened instances.
+    #[allow(clippy::result_unit_err)]
+    pub fn run_regarbling<F>(
+        &mut self,
+        seeds: Vec<(usize, Seed)>,
+        live_capacity: usize,
+        builder: F,
+    ) -> Result<(), ()>
+    where
+        F: Fn(
+                &mut StreamingMode<GarbleMode<AesNiHasher, AESAccumulatingHash>>,
+                &I::WireRepr,
+            ) -> WireId
+            + Send
+            + Sync
+            + Copy,
+    {
+        let Stage::Filled {
+            first,
+            second,
+            regarbled,
+        } = &mut self.stage
+        else {
+            panic!("Can't run regarbling for Evaluator not in Filled stage");
+        };
+
+        let iter = first.iter().zip_eq(second.iter()).enumerate();
+
+        let inputs = self.config.input.clone();
+        let to_finalize = &self.to_finalize;
+        let nonce = self.nonce;
+
+        super::get_optimized_pool().install(|| {
+            iter.par_bridge()
+                .map(|(index, (first_commit, second_commit))| {
+                    // Only process opened instances (not in to_finalize)
+                    if to_finalize.contains(&index) {
+                        return Ok(());
+                    }
+
+                    let Some(garbling_seed) = seeds
+                        .iter()
+                        .find_map(|(i, seed)| (i == &index).then_some(seed))
+                    else {
+                        error!("failed to find seed for instance {}", index);
+                        return Err(());
+                    };
+
+                    let inputs = inputs.clone();
+                    let hasher = AESAccumulatingHash::default();
+
+                    let span = tracing::info_span!("regarble", instance = index);
+                    let _enter = span.enter();
+
+                    info!("Starting regarbling of circuit (cut-and-choose)");
+
+                    let res: StreamingResult<
+                        GarbleMode<AesNiHasher, AESAccumulatingHash>,
+                        I,
+                        GarbledWire,
+                    > = CircuitBuilder::streaming_garbling(
+                        inputs.clone(),
+                        live_capacity,
+                        *garbling_seed,
+                        hasher,
+                        builder,
+                    );
+
+                    let res = res.into();
+                    let regarbling_first_commit = CommitPhaseOne::<H>::from_instance(&res);
+
+                    if &regarbling_first_commit != first_commit {
+                        error!("regarbling failed, first commit not equal");
+                        return Err(());
+                    }
+
+                    let regarbling_second_commit = CommitPhaseTwo::<H>::from_instance(&res, nonce);
+
+                    if regarbling_second_commit.input_commitments()
+                        != second_commit.input_commitments()
+                    {
+                        error!("regarbling failed, second commit not equal");
+                        return Err(());
+                    }
+
+                    Ok(())
+                })
+                .collect::<Result<Vec<()>, ()>>()
+        })?;
+
+        *regarbled = true;
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "test-utils")]
