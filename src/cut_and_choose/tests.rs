@@ -150,19 +150,19 @@ fn cut_and_choose_one_bit_e2e() {
         }
     }
 
-    // Run regarbling checks and persist ciphertexts
+    // Run full commit check and persist ciphertexts
     let out_dir = PathBuf::from("target/cut_and_choose_test_simple");
     let handler_provider =
         FileCiphertextHandlerProvider::new(out_dir.clone(), None).expect("create sink provider");
     evaluator
-        .run_regarbling(
+        .full_check_commit(
             seeds,
             &receivers,
             &handler_provider,
             CAPACITY,
             one_bit_circuit,
         )
-        .expect("regarbling ok");
+        .expect("full check commit ok");
 
     for j in join_handles {
         j.join().unwrap();
@@ -425,14 +425,14 @@ fn cut_and_choose_fq12_mul_e2e() {
         FileCiphertextHandlerProvider::new(out_dir.clone(), None).expect("create sink provider");
 
     evaluator
-        .run_regarbling(
+        .full_check_commit(
             seeds,
             &receivers,
             &sink_provider,
             CAPACITY,
             build_fq12_mul_eq_const,
         )
-        .expect("regarbling ok");
+        .expect("full check commit ok");
 
     for j in join_handles {
         j.join().unwrap();

@@ -155,7 +155,7 @@ impl<H: LabelCommitHasher> Evaluator<H> {
     }
 
     #[allow(clippy::result_unit_err)]
-    pub fn run_regarbling<CSourceProvider, CHandlerProvider>(
+    pub fn full_check_commit<CSourceProvider, CHandlerProvider>(
         &mut self,
         seeds: Vec<(usize, Seed)>,
         ciphertext_sources_provider: &CSourceProvider,
@@ -167,7 +167,7 @@ impl<H: LabelCommitHasher> Evaluator<H> {
         CHandlerProvider::Handler: 'static,
         <CHandlerProvider::Handler as CiphertextHandler>::Result: 'static + Into<CiphertextCommit>,
     {
-        self.inner.run_regarbling(
+        self.inner.full_check_commit(
             seeds,
             ciphertext_sources_provider,
             ciphertext_sink_provider,

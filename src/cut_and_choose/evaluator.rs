@@ -142,10 +142,16 @@ where
         &self.to_finalize
     }
 
-    // 1. Check that `OpenForInstance` matches the ones stored in `self.to_finalize`.
-    // 2. For `Open` run `streaming_garbling` via rayon, where at the end it checks for a match with saved commits
+    /// Performs comprehensive verification of all commitments across finalized and opened instances.
+    ///
+    /// This method verifies:
+    /// 1. For finalized instances: checks ciphertext hash matches the committed value
+    /// 2. For opened instances: re-garbles the circuit and verifies both phase one and phase two commits
+    ///
+    /// This is a critical security step in the cut-and-choose protocol that ensures the garbler
+    /// has honestly generated all garbled circuits.
     #[allow(clippy::result_unit_err)]
-    pub fn run_regarbling<CSourceProvider, CHandlerProvider, F>(
+    pub fn full_check_commit<CSourceProvider, CHandlerProvider, F>(
         &mut self,
         seeds: Vec<(usize, Seed)>,
         ciphertext_sources_provider: &CSourceProvider,
@@ -172,7 +178,7 @@ where
             regarbled,
         } = &mut self.stage
         else {
-            panic!("Can't run regarbling for not filled Evaluator");
+            panic!("Can't run full commit check for Evaluator not in Filled stage");
         };
 
         let iter = first.iter().zip_eq(second.iter()).enumerate();
