@@ -4,13 +4,15 @@
 //   cargo run --example soldering --release --features sp1-soldering -- prove
 //   cargo run --example soldering --release --features sp1-soldering -- verify
 
+#[cfg(feature = "sp1-soldering")]
 use std::fs;
 
 #[cfg(feature = "sp1-soldering")]
-use garbled_snark_verifier::sp1_soldering::{
-    Sha256Commit, SolderingProof, hash_label, prove_soldering, verify_soldering,
+use garbled_snark_verifier::{
+    GarbledWire, S,
+    sp1_soldering::{Sha256Commit, SolderingProof, hash_label, prove_soldering, verify_soldering},
 };
-use garbled_snark_verifier::{GarbledWire, S};
+#[cfg(feature = "sp1-soldering")]
 use rand::Rng;
 #[cfg(feature = "sp1-soldering")]
 use serde::{Deserialize, Serialize};

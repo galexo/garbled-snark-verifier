@@ -5,6 +5,8 @@ use std::{path::PathBuf, thread};
 use ark_ec::AffineRepr;
 use ark_ff::AdditiveGroup;
 use crossbeam::channel;
+#[cfg(feature = "sp1-soldering")]
+use garbled_snark_verifier::sp1_soldering::SolderingProof;
 use garbled_snark_verifier::{
     CommitPhaseOne, CommitPhaseTwo, EvaluatedWire, OpenForInstance, S,
     ark::{
@@ -15,7 +17,6 @@ use garbled_snark_verifier::{
     cut_and_choose::FileCiphertextHandlerProvider,
     garbled_groth16,
     groth16_cut_and_choose::{self as ccn, EvaluatorCaseInput},
-    sp1_soldering::SolderingProof,
 };
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -43,6 +44,7 @@ enum SetupBroadcast {
     /// Step 3 — seeds for all challenge instances (open set).
     OpenSeeds(Vec<(usize, ccn::Seed)>),
     /// Step 4 — SP1-based soldering proof plus per-instance deltas.
+    #[cfg(feature = "sp1-soldering")]
     SolderingProof(Box<SolderingProof>),
     /// Base evaluator labels used to derive finalized inputs post-soldering.
     BaseInput(Box<EvaluatorCaseInput>),
@@ -95,6 +97,7 @@ impl<F: ark::PrimeField> ark::ConstraintSynthesizer<F> for DummyCircuit<F> {
     }
 }
 
+#[cfg(feature = "sp1-soldering")]
 fn main() {
     if !garbled_snark_verifier::hardware_aes_available() {
         eprintln!(
@@ -175,6 +178,11 @@ fn main() {
     assert!(errors.is_empty(), "errors: {errors:?}")
 }
 
+#[cfg(not(feature = "sp1-soldering"))]
+fn main() {
+    eprintln!("Requires: cargo run --example groth16_cut_and_choose --features sp1-soldering");
+}
+
 fn run_garbler(
     cfg: ccn::Config,
     pk: ArkProvingKey<Bn254>,
@@ -245,6 +253,7 @@ fn run_garbler(
     });
 
     // Produce and send soldering proof (timed via span; no progress output)
+    #[cfg(feature = "sp1-soldering")]
     {
         let _span = tracing::info_span!("soldering").entered();
         info!("start");
@@ -370,20 +379,28 @@ fn run_evaluator(
     )
     .expect("full check commit");
 
-    // Verify soldering proof binds inputs to commits
-    let SetupBroadcast::SolderingProof(proof) = g2e_rx.recv().expect("recv soldering proof") else {
-        panic!("unexpected message; expected soldering proof")
-    };
+    #[cfg(feature = "sp1-soldering")]
+    {
+        // Verify soldering proof binds inputs to commits
+        let SetupBroadcast::SolderingProof(proof) = g2e_rx.recv().expect("recv soldering proof")
+        else {
+            panic!("unexpected message; expected soldering proof")
+        };
 
-    eval.verify_soldering_against_commits(*proof)
-        .expect("soldering verify");
+        eval.verify_soldering_against_commits(*proof)
+            .expect("soldering verify");
 
-    // Receive constants for additional instances
-    // Receive the base-case evaluator input (labels)
-    let SetupBroadcast::BaseInput(base_case) = g2e_rx.recv().expect("recv base input") else {
-        panic!("unexpected message; expected base evaluator input")
-    };
+        // Receive the base-case evaluator input (labels)
+        let SetupBroadcast::BaseInput(base_case) = g2e_rx.recv().expect("recv base input") else {
+            panic!("unexpected message; expected base evaluator input")
+        };
 
-    eval.run_evaluate_with_soldered_instances(&out_dir, *base_case)
-        .expect("soldered evaluate")
+        eval.run_evaluate_with_soldered_instances(&out_dir, *base_case)
+            .expect("soldered evaluate")
+    }
+
+    #[cfg(not(feature = "sp1-soldering"))]
+    {
+        panic!("sp1-soldering feature is required to run this example");
+    }
 }

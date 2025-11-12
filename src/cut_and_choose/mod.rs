@@ -31,6 +31,9 @@ pub type Seed = u64;
 
 pub type CiphertextCommit = [u8; 16];
 
+/// Type alias for commitment tuple (phase one, phase two)
+pub type Commitment<HHasher> = (Vec<CommitPhaseOne<HHasher>>, Vec<CommitPhaseTwo<HHasher>>);
+
 /// Per-wire label commitments used in both `Commit₁` and `Commit₂`.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct LabelCommit<H: Clone + Copy> {

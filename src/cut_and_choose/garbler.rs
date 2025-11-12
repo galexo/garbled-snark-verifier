@@ -66,7 +66,7 @@ impl<I: CircuitInput>
 
 /// `Commit₁(i)` payload containing ciphertext hash, per-wire input commits,
 /// output commits, and constant wire values (spec Step 1.2).
-#[derive(Clone, Debug, Serialize, Deserialize, Eq)]
+#[derive(Debug, Serialize, Deserialize, Eq)]
 #[serde(bound = "H: LabelCommitHasher")]
 pub struct CommitPhaseOne<H: LabelCommitHasher = DefaultLabelCommitHasher> {
     ciphertext_hash: CiphertextCommit,
@@ -77,6 +77,19 @@ pub struct CommitPhaseOne<H: LabelCommitHasher = DefaultLabelCommitHasher> {
     output_label0_commit: H::Output,
     true_constant: u128,
     false_constant: u128,
+}
+
+impl<H: LabelCommitHasher> Clone for CommitPhaseOne<H> {
+    fn clone(&self) -> Self {
+        Self {
+            ciphertext_hash: self.ciphertext_hash,
+            input_commitments: self.input_commitments.clone(),
+            output_label0_commit: self.output_label0_commit,
+            output_label1_commit: self.output_label1_commit,
+            true_constant: self.true_constant,
+            false_constant: self.false_constant,
+        }
+    }
 }
 
 impl<H: LabelCommitHasher> PartialEq for CommitPhaseOne<H> {
@@ -91,6 +104,25 @@ impl<H: LabelCommitHasher> PartialEq for CommitPhaseOne<H> {
 }
 
 impl<H: LabelCommitHasher> CommitPhaseOne<H> {
+    /// Create a new `CommitPhaseOne` directly from its components.
+    pub fn new(
+        ciphertext_hash: CiphertextCommit,
+        input_commitments: Vec<LabelCommit<H::Output>>,
+        output_label1_commit: H::Output,
+        output_label0_commit: H::Output,
+        true_constant: u128,
+        false_constant: u128,
+    ) -> Self {
+        Self {
+            ciphertext_hash,
+            input_commitments,
+            output_label1_commit,
+            output_label0_commit,
+            true_constant,
+            false_constant,
+        }
+    }
+
     /// Recompute the `Commit₁` payload (without nonce injection) for a garbled instance.
     pub fn from_instance(instance: &GarbledInstance) -> Self {
         Self {
@@ -130,13 +162,26 @@ impl<H: LabelCommitHasher> CommitPhaseOne<H> {
 
 /// `Commit₂(i)` payload containing nonce-blended per-wire input commitments
 /// (spec Step 1.4).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "H: LabelCommitHasher")]
 pub struct CommitPhaseTwo<H: LabelCommitHasher = DefaultLabelCommitHasher> {
     input_commitments: Vec<LabelCommit<H::Output>>,
 }
 
+impl<H: LabelCommitHasher> Clone for CommitPhaseTwo<H> {
+    fn clone(&self) -> Self {
+        Self {
+            input_commitments: self.input_commitments.clone(),
+        }
+    }
+}
+
 impl<H: LabelCommitHasher> CommitPhaseTwo<H> {
+    /// Create a new `CommitPhaseTwo` directly from input commitments.
+    pub fn new(input_commitments: Vec<LabelCommit<H::Output>>) -> Self {
+        Self { input_commitments }
+    }
+
     /// Recompute the `Commit₂` payload (with nonce injection) for a garbled instance.
     pub fn from_instance(instance: &GarbledInstance, nonce: S) -> Self {
         Self {
@@ -179,6 +224,13 @@ pub enum OpenForInstance {
         index: usize,
         garbling_thread: JoinHandle<()>,
     },
+}
+
+/// Result of opening commitments without ciphertext handlers
+#[derive(Debug)]
+pub struct OpenCommit {
+    pub open: Vec<(usize, Seed)>,
+    pub closed: Vec<(usize, Seed)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -307,6 +359,67 @@ where
             .iter()
             .map(|instance| CommitPhaseTwo::<HHasher>::from_instance(instance, self.nonce.unwrap()))
             .collect()
+    }
+
+    /// Get both phase one and phase two commitments (backward compatibility)
+    pub fn get_commitment<HHasher: LabelCommitHasher>(&self) -> Option<super::Commitment<HHasher>> {
+        self.nonce.map(|nonce| {
+            let phase_one = self
+                .instances
+                .iter()
+                .map(CommitPhaseOne::<HHasher>::from_instance)
+                .collect();
+
+            let phase_two = self
+                .instances
+                .iter()
+                .map(|instance| CommitPhaseTwo::<HHasher>::from_instance(instance, nonce))
+                .collect();
+
+            (phase_one, phase_two)
+        })
+    }
+
+    /// Get finalized indexes (backward compatibility)
+    pub fn finalized_indexes(&self) -> Option<&[usize]> {
+        match &self.stage {
+            GarblerStage::Generating { .. } => None,
+            GarblerStage::PreparedForEval { indexes_to_eval } => Some(indexes_to_eval),
+        }
+    }
+
+    /// Open commitment without ciphertext handlers (backward compatibility)
+    pub fn open_commit_without_ciphertexts(
+        &mut self,
+        mut indexes_to_finalize: Vec<usize>,
+    ) -> OpenCommit {
+        indexes_to_finalize.sort();
+        indexes_to_finalize.dedup();
+
+        assert_eq!(indexes_to_finalize.len(), self.config().to_finalize());
+
+        let seeds = self
+            .stage
+            .next_stage(indexes_to_finalize.clone().into_boxed_slice());
+
+        let mut commit = OpenCommit {
+            open: vec![],
+            closed: vec![],
+        };
+
+        seeds
+            .into_vec()
+            .into_iter()
+            .enumerate()
+            .for_each(|(index, seed)| {
+                if indexes_to_finalize.binary_search(&index).is_ok() {
+                    commit.closed.push((index, seed));
+                } else {
+                    commit.open.push((index, seed));
+                }
+            });
+
+        commit
     }
 
     pub fn open_commit<F, CTH: 'static + Send + CiphertextHandler>(

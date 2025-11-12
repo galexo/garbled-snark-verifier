@@ -494,10 +494,6 @@ mod tests {
     use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
     use ark_ff::UniformRand;
     use ark_groth16::Groth16;
-    use ark_relations::{
-        lc,
-        r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
-    };
     use ark_snark::{CircuitSpecificSetupSNARK, SNARK};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;

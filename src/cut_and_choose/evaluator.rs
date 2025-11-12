@@ -121,6 +121,10 @@ where
         }
     }
 
+    pub fn config(&self) -> &Config<I> {
+        &self.config
+    }
+
     pub fn fill_second_commit(&mut self, commits: Vec<CommitPhaseTwo<H>>) {
         let first = match &mut self.stage {
             Stage::Created(first) => mem::take(first),
@@ -138,8 +142,33 @@ where
         self.nonce
     }
 
+    /// Get both phase one and phase two commitments if available (backward compatibility)
+    pub fn get_commitment(&self) -> Option<super::Commitment<H>>
+    where
+        CommitPhaseOne<H>: Clone,
+        CommitPhaseTwo<H>: Clone,
+    {
+        match &self.stage {
+            Stage::Filled { first, second, .. } => Some((first.clone(), second.clone())),
+            #[cfg(feature = "sp1-soldering")]
+            Stage::Soldered { first, second, .. } => Some((first.clone(), second.clone())),
+            _ => None,
+        }
+    }
+
     pub fn finalized_indexes(&self) -> &[usize] {
         &self.to_finalize
+    }
+
+    /// Get a specific commit from phase one by index (backward compatibility)
+    pub fn get_commit_phase_one(&self, index: usize) -> Option<&CommitPhaseOne<H>> {
+        match &self.stage {
+            Stage::Empty => None,
+            Stage::Created(first) => first.get(index),
+            Stage::Filled { first, .. } => first.get(index),
+            #[cfg(feature = "sp1-soldering")]
+            Stage::Soldered { first, .. } => first.get(index),
+        }
     }
 
     /// Performs comprehensive verification of all commitments across finalized and opened instances.
@@ -291,13 +320,13 @@ mod test_utils {
     {
         pub fn from_raw_parts(
             config: Config<I>,
-            nonce: S,
+            nonce: u128,
             to_finalize: Box<[usize]>,
             stage: Stage<H>,
         ) -> Self {
             Self {
                 config,
-                nonce,
+                nonce: S::from_u128(nonce),
                 to_finalize,
                 stage,
             }
@@ -334,7 +363,12 @@ mod test_utils {
         H: LabelCommitHasher,
     {
         fn from(parts: EvaluatorRawParts<I, H>) -> Self {
-            Self::from_raw_parts(parts.config, parts.nonce, parts.to_finalize, parts.stage)
+            Self::from_raw_parts(
+                parts.config,
+                parts.nonce.to_u128(),
+                parts.to_finalize,
+                parts.stage,
+            )
         }
     }
 

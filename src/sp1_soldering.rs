@@ -14,6 +14,9 @@ mod types;
 
 pub use types::{Sha256Commit, SolderedLabelsData as SolderedLabels};
 
+/// Type alias for wire deltas (delta0, delta1) for backward compatibility
+pub type WireDelta = (u128, u128);
+
 use crate::{GarbledWire, S, Sha256LabelCommitHasher, circuit::CircuitInput, commit_label_with};
 
 /// Hash a label to create a SHA256 commitment using the standard label commit hasher
@@ -32,6 +35,7 @@ pub fn elf() -> &'static [u8] {
     include_bytes!(env!("SP1_ELF_sp1-soldering-guest"))
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SolderingProof {
     pub proof: Groth16Bn254Proof,
     pub deltas: Vec<Vec<(u128, u128)>>,

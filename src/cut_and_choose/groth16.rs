@@ -54,6 +54,36 @@ impl Garbler {
         self.inner.commit_phase_two::<HHasher>(nonce)
     }
 
+    pub fn get_commitment<HHasher: LabelCommitHasher>(
+        &self,
+    ) -> Option<generic::Commitment<HHasher>> {
+        self.inner.get_commitment::<HHasher>()
+    }
+
+    pub fn finalized_indexes(&self) -> Option<&[usize]> {
+        self.inner.finalized_indexes()
+    }
+
+    pub fn soldered_base_commitment<HHasher: LabelCommitHasher>(
+        &self,
+    ) -> Option<Vec<generic::LabelCommit<HHasher::Output>>> {
+        self.inner.soldered_base_commitment::<HHasher>()
+    }
+
+    pub fn finalized_output_label_commitment<HHasher: LabelCommitHasher>(
+        &self,
+    ) -> Option<Vec<(HHasher::Output, HHasher::Output)>> {
+        self.inner.finalized_output_label_commitment::<HHasher>()
+    }
+
+    pub fn open_commit_without_ciphertexts(
+        &mut self,
+        indexes_to_finalize: Vec<usize>,
+    ) -> generic::OpenCommit {
+        self.inner
+            .open_commit_without_ciphertexts(indexes_to_finalize)
+    }
+
     pub fn open_commit<CTH: 'static + Send + CiphertextHandler>(
         &mut self,
         indexes_to_finalize: Vec<(usize, CTH)>,
@@ -142,6 +172,10 @@ impl<H: LabelCommitHasher> Evaluator<H> {
         Self { inner }
     }
 
+    pub fn config(&self) -> &Config {
+        self.inner.config()
+    }
+
     pub fn fill_second_commit(&mut self, commits: Vec<CommitPhaseTwo<H>>) {
         self.inner.fill_second_commit(commits);
     }
@@ -150,8 +184,20 @@ impl<H: LabelCommitHasher> Evaluator<H> {
         self.inner.get_nonce()
     }
 
+    pub fn get_commitment(&self) -> Option<generic::Commitment<H>>
+    where
+        generic::CommitPhaseOne<H>: Clone,
+        generic::CommitPhaseTwo<H>: Clone,
+    {
+        self.inner.get_commitment()
+    }
+
     pub fn finalized_indexes(&self) -> &[usize] {
         self.inner.finalized_indexes()
+    }
+
+    pub fn get_commit_phase_one(&self, index: usize) -> Option<&CommitPhaseOne<H>> {
+        self.inner.get_commit_phase_one(index)
     }
 
     #[allow(clippy::result_unit_err)]
@@ -280,6 +326,23 @@ impl SolderInput for garbled_groth16::EvaluatorCompressedInput {
 
 #[cfg(feature = "sp1-soldering")]
 impl Evaluator<generic::Sha256LabelCommitHasher> {
+    pub fn verified_soldered_base_commitment(
+        &self,
+    ) -> Option<Vec<generic::LabelCommit<crate::sp1_soldering::Sha256Commit>>> {
+        self.inner.verified_soldered_base_commitment()
+    }
+
+    pub fn finalized_output_label_commitment(
+        &self,
+    ) -> Option<
+        Vec<(
+            crate::sp1_soldering::Sha256Commit,
+            crate::sp1_soldering::Sha256Commit,
+        )>,
+    > {
+        self.inner.finalized_output_label_commitment()
+    }
+
     pub fn verify_soldering_against_commits(
         &mut self,
         proof: crate::sp1_soldering::SolderingProof,
