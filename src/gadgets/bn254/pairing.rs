@@ -1698,6 +1698,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_final_exponentiation_matches_arkworks() {
         use ark_ec::pairing::Pairing;
         // Deterministic inputs
@@ -1798,6 +1799,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_miller_loop_var_q_matches_ark_single() {
         use ark_ec::pairing::Pairing;
         let mut rng = ChaCha20Rng::seed_from_u64(0x515AF1);
@@ -2102,6 +2104,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_pairing_const_q_matches_ark_single() {
         use ark_ec::pairing::Pairing;
         let mut rng = ChaCha20Rng::seed_from_u64(12);

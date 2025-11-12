@@ -632,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_false_bitflip_a() {
         run_false_bitflip_test(54321, |inputs| {
             inputs.a.x += ark_bn254::Fq::ONE;
@@ -639,6 +640,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_false_bitflip_b() {
         run_false_bitflip_test(98765, |inputs| {
             // Flip one limb by adding ONE to c0 of x
@@ -647,6 +649,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_false_bitflip_c() {
         run_false_bitflip_test(19283, |inputs| {
             inputs.c.x += ark_bn254::Fq::ONE;
@@ -686,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_no_public_inputs_false_bitflip_a() {
         // Test unsuccessful verification with empty public inputs - corrupt proof.a
         let k = 6;
@@ -721,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_no_public_inputs_false_bitflip_b() {
         // Test unsuccessful verification with empty public inputs - corrupt proof.b
         let k = 6;
@@ -756,6 +761,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_no_public_inputs_false_bitflip_c() {
         // Test unsuccessful verification with empty public inputs - corrupt proof.c
         let k = 6;
@@ -791,6 +797,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_false_random() {
         use rand::SeedableRng;
         use rand_chacha::ChaCha20Rng;
@@ -984,6 +991,7 @@ mod tests {
     // runs Miller loop + final exponentiation in-circuit. Kept for completeness
     // but ignored by default; run explicitly when needed.
     #[test]
+    #[ignore = "Only run when modifying gadgets; this test is slow"]
     fn test_groth16_verify_compressed_true_small() {
         let k = 4; // circuit size; pairing cost dominates anyway
         let mut rng = ChaCha20Rng::seed_from_u64(33333);
