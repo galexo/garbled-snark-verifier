@@ -1009,4 +1009,49 @@ where
 
         self.evaluate_from(ciphertext_repo, cases, capacity, builder)
     }
+
+    /// Returns verified base instance input commitments after successful soldering verification.
+    ///
+    /// Only available in Soldered stage after `verify_soldering_against_commits` has been called.
+    /// Returns the input wire label commitments for the base instance (first finalized index).
+    ///
+    /// Returns `None` if not in Soldered stage.
+    pub fn verified_soldered_base_commitment(&self) -> Option<Vec<LabelCommit<Sha256Commit>>> {
+        let Stage::Soldered { first, .. } = &self.stage else {
+            return None;
+        };
+
+        let base_idx = *self.to_finalize.first()?;
+        Some(first[base_idx].input_commitments().to_vec())
+    }
+
+    /// Returns output label commitments (true, false) for all finalized instances.
+    ///
+    /// Available after Filled stage (with regarbled=true) or Soldered stage.
+    /// Returns a vector of tuples where each tuple contains:
+    /// - First element: commitment to the label when output is true
+    /// - Second element: commitment to the label when output is false
+    ///
+    /// Returns `None` if not in appropriate stage.
+    pub fn finalized_output_label_commitment(&self) -> Option<Vec<(Sha256Commit, Sha256Commit)>> {
+        let first_commits = match &self.stage {
+            Stage::Filled {
+                first,
+                regarbled: true,
+                ..
+            } => first,
+            Stage::Soldered { first, .. } => first,
+            _ => return None,
+        };
+
+        Some(
+            self.to_finalize
+                .iter()
+                .map(|&idx| {
+                    let commit = &first_commits[idx];
+                    (commit.output_commit_true(), commit.output_commit_false())
+                })
+                .collect(),
+        )
+    }
 }
