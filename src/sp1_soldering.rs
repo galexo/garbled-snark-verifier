@@ -3,15 +3,14 @@ use std::{path::PathBuf, time::Instant};
 use bincode::config;
 use sp1_core_executor::SP1ContextBuilder;
 use sp1_core_machine::io::SP1Stdin;
-use sp1_prover::{
-    Groth16Bn254Proof, SP1Prover, SP1PublicValues, build, components::CpuProverComponents,
-};
+use sp1_prover::{SP1Prover, SP1PublicValues, build, components::CpuProverComponents};
 use sp1_stark::SP1ProverOpts;
 use tracing::{info, instrument};
 
 #[path = "../sp1-soldering-program/src/types.rs"]
 mod types;
 
+pub use sp1_prover::Groth16Bn254Proof;
 pub use types::{Sha256Commit, SolderedLabelsData as SolderedLabels};
 
 /// Type alias for wire deltas (delta0, delta1) for backward compatibility
