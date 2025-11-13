@@ -41,7 +41,6 @@ pub enum Stage<H: LabelCommitHasher> {
     Filled {
         first: Vec<CommitPhaseOne<H>>,
         second: Vec<CommitPhaseTwo<H>>,
-        regarbled: bool,
     },
     #[cfg(feature = "sp1-soldering")]
     Soldered {
@@ -52,18 +51,16 @@ pub enum Stage<H: LabelCommitHasher> {
 }
 
 impl<H: LabelCommitHasher> Stage<H> {
-    fn get_commit_if_ready(&self) -> Option<&[CommitPhaseOne<H>]> {
+    fn get_commit_if_ready(&self, regarbled: bool) -> Option<&[CommitPhaseOne<H>]> {
+        if !regarbled {
+            return None;
+        }
         match self {
             Stage::Empty => None,
             Stage::Created(_) => None,
-            Stage::Filled {
-                first,
-                regarbled: true,
-                ..
-            } => Some(first),
+            Stage::Filled { first, .. } => Some(first),
             #[cfg(feature = "sp1-soldering")]
             Stage::Soldered { first, .. } => Some(first),
-            _ => None,
         }
     }
 }
@@ -80,6 +77,8 @@ pub struct Evaluator<
     /// commit from `Garbler`
     nonce: S,
     to_finalize: Box<[usize]>,
+    /// Tracks whether opened instances have been successfully regarbled and verified
+    regarbled: bool,
     stage: Stage<H>,
 }
 
@@ -118,6 +117,7 @@ where
             to_finalize: idxs.into_boxed_slice(),
             config,
             nonce: S::from_u128(rng.r#gen()),
+            regarbled: false,
         }
     }
 
@@ -128,13 +128,12 @@ where
     pub fn fill_second_commit(&mut self, commits: Vec<CommitPhaseTwo<H>>) {
         let first = match &mut self.stage {
             Stage::Created(first) => mem::take(first),
-            _ => panic!("Can't fill second commit for filled `Evaluator`"),
+            _ => panic!("fill_second_commit can only be called once"),
         };
 
         self.stage = Stage::Filled {
             first,
             second: commits,
-            regarbled: false,
         };
     }
 
@@ -149,7 +148,7 @@ where
         CommitPhaseTwo<H>: Clone,
     {
         match &self.stage {
-            Stage::Filled { first, second, .. } => Some((first.clone(), second.clone())),
+            Stage::Filled { first, second } => Some((first.clone(), second.clone())),
             #[cfg(feature = "sp1-soldering")]
             Stage::Soldered { first, second, .. } => Some((first.clone(), second.clone())),
             _ => None,
@@ -158,6 +157,25 @@ where
 
     pub fn finalized_indexes(&self) -> &[usize] {
         &self.to_finalize
+    }
+
+    /// Returns whether opened instances have been successfully regarbled and verified
+    pub fn is_regarbled(&self) -> bool {
+        self.regarbled
+    }
+
+    /// Manually sets the `regarbled` flag to `true`.
+    ///
+    /// # Note
+    ///
+    /// This flag is automatically set by [`full_check_commit()`](Self::full_check_commit)
+    /// and [`run_regarbling()`](Self::run_regarbling) after successful verification.
+    ///
+    /// Only call this method if you have verified the opened instances through an alternative
+    /// mechanism or are restoring a previously verified state (e.g., from deserialization).
+    /// Incorrect use may compromise the security of the cut-and-choose protocol.
+    pub fn mark_regarbled(&mut self) {
+        self.regarbled = true;
     }
 
     /// Get a specific commit from phase one by index (backward compatibility)
@@ -201,13 +219,13 @@ where
             + Sync
             + Copy,
     {
-        let Stage::Filled {
-            first,
-            second,
-            regarbled,
-        } = &mut self.stage
-        else {
-            panic!("Can't run full commit check for Evaluator not in Filled stage");
+        let (first, second) = match &mut self.stage {
+            Stage::Filled { first, second } => (first, second),
+            #[cfg(feature = "sp1-soldering")]
+            Stage::Soldered { first, second, .. } => (first, second),
+            _ => {
+                panic!("Can't run full commit check for Evaluator not in Filled or Soldered stage")
+            }
         };
 
         let iter = first.iter().zip_eq(second.iter()).enumerate();
@@ -301,7 +319,7 @@ where
                 .collect::<Result<Vec<()>, ()>>()
         })?;
 
-        *regarbled = true;
+        self.regarbled = true;
 
         Ok(())
     }
@@ -329,13 +347,11 @@ where
             + Sync
             + Copy,
     {
-        let Stage::Filled {
-            first,
-            second,
-            regarbled,
-        } = &mut self.stage
-        else {
-            panic!("Can't run regarbling for Evaluator not in Filled stage");
+        let (first, second) = match &mut self.stage {
+            Stage::Filled { first, second } => (first, second),
+            #[cfg(feature = "sp1-soldering")]
+            Stage::Soldered { first, second, .. } => (first, second),
+            _ => panic!("Can't run regarbling for Evaluator not in Filled or Soldered stage"),
         };
 
         let iter = first.iter().zip_eq(second.iter()).enumerate();
@@ -402,7 +418,7 @@ where
                 .collect::<Result<Vec<()>, ()>>()
         })?;
 
-        *regarbled = true;
+        self.regarbled = true;
 
         Ok(())
     }
@@ -423,18 +439,26 @@ mod test_utils {
             config: Config<I>,
             nonce: u128,
             to_finalize: Box<[usize]>,
+            regarbled: bool,
             stage: Stage<H>,
         ) -> Self {
             Self {
                 config,
                 nonce: S::from_u128(nonce),
                 to_finalize,
+                regarbled,
                 stage,
             }
         }
 
-        pub fn into_raw_parts(self) -> (Config<I>, S, Box<[usize]>, Stage<H>) {
-            (self.config, self.nonce, self.to_finalize, self.stage)
+        pub fn into_raw_parts(self) -> (Config<I>, S, Box<[usize]>, bool, Stage<H>) {
+            (
+                self.config,
+                self.nonce,
+                self.to_finalize,
+                self.regarbled,
+                self.stage,
+            )
         }
     }
 
@@ -448,6 +472,7 @@ mod test_utils {
         pub config: Config<I>,
         pub nonce: S,
         pub to_finalize: Box<[usize]>,
+        pub regarbled: bool,
         pub stage: Stage<H>,
     }
 
@@ -468,6 +493,7 @@ mod test_utils {
                 parts.config,
                 parts.nonce.to_u128(),
                 parts.to_finalize,
+                parts.regarbled,
                 parts.stage,
             )
         }
@@ -479,11 +505,12 @@ mod test_utils {
         H: LabelCommitHasher,
     {
         fn from(value: Evaluator<I, H>) -> Self {
-            let (config, nonce, to_finalize, stage) = value.into_raw_parts();
+            let (config, nonce, to_finalize, regarbled, stage) = value.into_raw_parts();
             Self {
                 config,
                 nonce,
                 to_finalize,
+                regarbled,
                 stage,
             }
         }
@@ -657,7 +684,7 @@ where
             + Sync
             + Copy,
     {
-        let commits = self.stage.get_commit_if_ready().unwrap();
+        let commits = self.stage.get_commit_if_ready(self.regarbled).unwrap();
 
         super::get_optimized_pool().install(|| {
             input_cases
@@ -877,7 +904,6 @@ where
         let Stage::Filled {
             first: first_commits,
             second: second_commits,
-            regarbled: true,
         } = mem::take(&mut self.stage)
         else {
             panic!()
@@ -1176,11 +1202,7 @@ where
     /// Returns `None` if not in appropriate stage.
     pub fn finalized_output_label_commitment(&self) -> Option<Vec<(Sha256Commit, Sha256Commit)>> {
         let first_commits = match &self.stage {
-            Stage::Filled {
-                first,
-                regarbled: true,
-                ..
-            } => first,
+            Stage::Filled { first, .. } if self.regarbled => first,
             Stage::Soldered { first, .. } => first,
             _ => return None,
         };

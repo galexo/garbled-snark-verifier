@@ -231,6 +231,25 @@ impl<H: LabelCommitHasher> Evaluator<H> {
         self.inner
             .run_regarbling(seeds, DEFAULT_CAPACITY, garbled_groth16::verify_compressed)
     }
+
+    /// Manually sets the `regarbled` flag to `true`.
+    ///
+    /// # Note
+    ///
+    /// This flag is automatically set by [`full_check_commit()`](Self::full_check_commit)
+    /// and [`run_regarbling()`](Self::run_regarbling) after successful verification.
+    ///
+    /// Only call this method if you have verified the opened instances through an alternative
+    /// mechanism or are restoring a previously verified state (e.g., from deserialization).
+    /// Incorrect use may compromise the security of the cut-and-choose protocol.
+    pub fn mark_regarbled(&mut self) {
+        self.inner.mark_regarbled();
+    }
+
+    /// Returns whether opened instances have been successfully regarbled and verified
+    pub fn is_regarbled(&self) -> bool {
+        self.inner.is_regarbled()
+    }
 }
 
 pub type EvaluatorCaseInput =
