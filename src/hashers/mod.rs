@@ -2,6 +2,8 @@
 //! These mirror the previous implementations under core::gate::garbling::hashers
 //! without functional changes.
 
+use sha2::{Digest, Sha256};
+
 use crate::{S, core::s::S_SIZE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,12 +31,26 @@ pub trait HashWithGate<const N: usize>: Clone + Send + Sync {
 #[derive(Clone, Debug, Default)]
 pub struct Blake3Hasher;
 
+#[inline(always)]
+fn blake3_gate_prf(label: S, gate_id: usize) -> S {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&label.to_bytes());
+    hasher.update(&gate_id.to_le_bytes());
+
+    let mut out = [0u8; S_SIZE];
+    // finalize() via Digest returns a GenericArray; slice directly without heap allocs.
+    let hash = hasher.finalize();
+    out.copy_from_slice(&hash[..S_SIZE]);
+
+    S::from_bytes(out)
+}
+
 impl HashWithGate<2> for Blake3Hasher {
     fn hash_with_gate(labels: &[S; 2], gate_id: usize) -> [S; 2] {
         let [selected_label, other_label] = labels;
 
-        let [h_selected] = Self::hash_with_gate(&[*selected_label], gate_id);
-        let [h_other] = Self::hash_with_gate(&[*other_label], gate_id);
+        let h_selected = blake3_gate_prf(*selected_label, gate_id);
+        let h_other = blake3_gate_prf(*other_label, gate_id);
 
         [h_selected, h_other]
     }
@@ -42,18 +58,7 @@ impl HashWithGate<2> for Blake3Hasher {
 
 impl HashWithGate<1> for Blake3Hasher {
     fn hash_with_gate(label: &[S; 1], gate_id: usize) -> [S; 1] {
-        let mut result = [0u8; S_SIZE];
-        let mut hasher = blake3::Hasher::new();
-
-        let b = label[0].to_bytes();
-
-        hasher.update(&b);
-        hasher.update(&gate_id.to_le_bytes());
-
-        let hash = hasher.finalize();
-        result.copy_from_slice(&hash.as_bytes()[0..S_SIZE]);
-
-        [S::from_bytes(result)]
+        [blake3_gate_prf(label[0], gate_id)]
     }
 }
 
@@ -120,6 +125,41 @@ impl HashWithGate<2> for DoubleAesNiHasher {
         }
 
         [S::from_bytes(o0), S::from_bytes(o1)]
+    }
+}
+
+/// SHA-256 based gate hasher derived from RustCrypto/hashes.
+#[derive(Clone, Debug, Default)]
+pub struct Sha256GateHasher;
+
+#[inline(always)]
+fn sha256_gate_prf(label: S, gate_id: usize, domain: u8) -> S {
+    let mut hasher = Sha256::new();
+    hasher.update(label.to_bytes());
+    hasher.update(gate_id.to_le_bytes());
+    hasher.update([domain]);
+
+    let digest = hasher.finalize();
+    let mut out = [0u8; S_SIZE];
+    out.copy_from_slice(&digest[..S_SIZE]);
+
+    S::from_bytes(out)
+}
+
+impl HashWithGate<2> for Sha256GateHasher {
+    #[inline(always)]
+    fn hash_with_gate(labels: &[S; 2], gate_id: usize) -> [S; 2] {
+        [
+            sha256_gate_prf(labels[0], gate_id, 0),
+            sha256_gate_prf(labels[1], gate_id, 1),
+        ]
+    }
+}
+
+impl HashWithGate<1> for Sha256GateHasher {
+    #[inline(always)]
+    fn hash_with_gate(label: &[S; 1], gate_id: usize) -> [S; 1] {
+        [sha256_gate_prf(label[0], gate_id, 0)]
     }
 }
 
