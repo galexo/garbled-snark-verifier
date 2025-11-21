@@ -101,17 +101,25 @@ impl HashWithGate<2> for DoubleAesNiHasher {
     #[inline(always)]
     fn hash_with_gate(labels: &[S; 2], gate_id: usize) -> [S; 2] {
         let tweak = to_tweak(gate_id);
-        let (c0, c1) = aes_ni::aes128_encrypt2_blocks_static_xor(
+        // Inner: e_i = AES(x_i) via zero mask.
+        let (e0, e1) = aes_ni::aes128_encrypt2_blocks_static_xor(
             labels[0].to_bytes(),
             labels[1].to_bytes(),
-            tweak,
+            [0u8; S_SIZE],
         )
         .expect("AES backend should be available (HW or software)");
 
-        let (d0, d1) = aes_ni::aes128_encrypt2_blocks_static_xor(c0, c1, [0u8; S_SIZE])
+        // Outer: o_i = AES(e_i ⊕ tweak).
+        let (mut o0, mut o1) = aes_ni::aes128_encrypt2_blocks_static_xor(e0, e1, tweak)
             .expect("AES backend should be available (HW or software)");
 
-        [S::from_bytes(d0), S::from_bytes(d1)]
+        // H(x, tweak) = AES(AES(x) ⊕ tweak) ⊕ AES(x)
+        for i in 0..S_SIZE {
+            o0[i] ^= e0[i];
+            o1[i] ^= e1[i];
+        }
+
+        [S::from_bytes(o0), S::from_bytes(o1)]
     }
 }
 
@@ -119,11 +127,20 @@ impl HashWithGate<1> for DoubleAesNiHasher {
     #[inline(always)]
     fn hash_with_gate(label: &[S; 1], gate_id: usize) -> [S; 1] {
         let tweak = to_tweak(gate_id);
-        let c0 = aes_ni::aes128_encrypt_block_static_xor(label[0].to_bytes(), tweak)
+        // Inner: e = AES(x) via zero mask.
+        let e = aes_ni::aes128_encrypt_block_static_xor(label[0].to_bytes(), [0u8; S_SIZE])
             .expect("AES backend should be available (HW or software)");
-        let c1 = aes_ni::aes128_encrypt_block_static_xor(c0, [0u8; S_SIZE])
+
+        // Outer: o = AES(e ⊕ tweak).
+        let mut o = aes_ni::aes128_encrypt_block_static_xor(e, tweak)
             .expect("AES backend should be available (HW or software)");
-        [S::from_bytes(c1)]
+
+        // H(x, tweak) = AES(AES(x) ⊕ tweak) ⊕ AES(x)
+        for i in 0..S_SIZE {
+            o[i] ^= e[i];
+        }
+
+        [S::from_bytes(o)]
     }
 }
 
