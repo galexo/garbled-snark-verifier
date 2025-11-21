@@ -62,7 +62,7 @@ macro_rules! component_key {
 }
 
 pub mod modes;
-pub use modes::{CircuitMode, EvaluateMode, ExecuteMode, GarbleMode};
+pub use modes::{CircuitMode, EvaluateMode, ExecuteMode, GarbleMode, SafeGarbleMode};
 
 pub mod ciphertext_source;
 pub use ciphertext_source::{ChannelSource, CiphertextSource, FileSource};

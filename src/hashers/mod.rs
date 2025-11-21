@@ -93,6 +93,40 @@ impl HashWithGate<1> for AesNiHasher {
     }
 }
 
+/// Double-AES hasher: AES(AES(label ^ tweak)) using the same static key.
+#[derive(Clone, Debug, Default)]
+pub struct DoubleAesNiHasher;
+
+impl HashWithGate<2> for DoubleAesNiHasher {
+    #[inline(always)]
+    fn hash_with_gate(labels: &[S; 2], gate_id: usize) -> [S; 2] {
+        let tweak = to_tweak(gate_id);
+        let (c0, c1) = aes_ni::aes128_encrypt2_blocks_static_xor(
+            labels[0].to_bytes(),
+            labels[1].to_bytes(),
+            tweak,
+        )
+        .expect("AES backend should be available (HW or software)");
+
+        let (d0, d1) = aes_ni::aes128_encrypt2_blocks_static_xor(c0, c1, [0u8; S_SIZE])
+            .expect("AES backend should be available (HW or software)");
+
+        [S::from_bytes(d0), S::from_bytes(d1)]
+    }
+}
+
+impl HashWithGate<1> for DoubleAesNiHasher {
+    #[inline(always)]
+    fn hash_with_gate(label: &[S; 1], gate_id: usize) -> [S; 1] {
+        let tweak = to_tweak(gate_id);
+        let c0 = aes_ni::aes128_encrypt_block_static_xor(label[0].to_bytes(), tweak)
+            .expect("AES backend should be available (HW or software)");
+        let c1 = aes_ni::aes128_encrypt_block_static_xor(c0, [0u8; S_SIZE])
+            .expect("AES backend should be available (HW or software)");
+        [S::from_bytes(c1)]
+    }
+}
+
 #[inline(always)]
 fn u64_to_mask(t0: u64, t1: u64) -> [u8; S_SIZE] {
     // Build mask in the same lane order as _mm_set_epi64x(t1, t0)

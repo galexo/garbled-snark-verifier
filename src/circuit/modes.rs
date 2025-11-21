@@ -20,6 +20,9 @@ pub use evaluate_mode::{EvaluateMode, EvaluatedWire, OptionalEvaluatedWire};
 mod multigarble_mode;
 pub use multigarble_mode::MultigarblingMode;
 
+pub mod safe_garble_mode;
+pub use safe_garble_mode::SafeGarbleMode;
+
 /// Execution backends for the streaming circuit.
 ///
 /// Credits vs fanout
