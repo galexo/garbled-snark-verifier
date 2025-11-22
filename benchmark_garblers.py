@@ -14,14 +14,13 @@ from itertools import product
 
 # Configuration
 INSTANCE_MODES = ["single", "cpu_count"]
-GATE_HASHERS = ["blake3", "sha256", "swankyaes"]
-CIPHERTEXT_HASHERS = ["aes", "blake3", "sha256", "swankyaes"]
+GATE_HASHERS = ["aes", "swankyaes", "sha256"]
+CIPHERTEXT_HASHERS = ["none", "sha256", "blake3"]
 LOG_DIR = Path("benchmark_logs")
 REPORT_FILE = Path("benchmark_report.md")
 
 # Regex pattern to extract timing from logs
 TIMING_PATTERN = re.compile(r"garbling: in ([\d.]+)s")
-
 
 def get_cpu_count():
     """Get the number of physical CPUs."""
@@ -46,7 +45,10 @@ def run_benchmark(instances, gate_hasher, ct_hasher, log_file):
         "--ciphertext-hasher", ct_hasher
     ]
 
-    env = {"RUST_LOG": "info"}
+    env = {
+        "RUST_LOG": "info",
+        "RUSTFLAGS": "-C target-cpu=native",
+    }
 
     print(f"  Running: --instances {instances} --gate-hasher {gate_hasher} --ciphertext-hasher {ct_hasher}")
     print(f"  Log file: {log_file}")

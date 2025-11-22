@@ -1,7 +1,7 @@
 // Demonstrates streaming garbling of a Groth16 verifier with selectable gate and ciphertext hashers.
 // Instances mode: single (default, 1 instance), cpu_count (parallel instances pinned to physical cores).
-// Gate hasher options: blake3 (default), sha256, swankyaes.
-// Ciphertext hasher options: aes (default), blake3, sha256, swankyaes.
+// Gate hasher options: aes (default), blake3, sha256, swankyaes.
+// Ciphertext hasher options: blake3 (default), sha256, swankyaes, none.
 // Run with e.g.:
 //   RUST_LOG=info cargo run --example groth16_safe_garble --release -- \\
 //     --instances cpu_count --gate-hasher blake3 --ciphertext-hasher blake3
@@ -9,7 +9,7 @@
 use std::{env, fmt::Write as _, time::Instant};
 
 use garbled_snark_verifier::{
-    AESAccumulatingHash, GarbledWire, S,
+    AesNiHasher, GarbledWire, S,
     ark::{self, CircuitSpecificSetupSNARK, SNARK, UniformRand},
     circuit::{CiphertextHandler, CircuitBuilder, StreamingResult, modes::GarbleMode},
     garbled_groth16,
@@ -75,6 +75,35 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 const CAPACITY: usize = 150_000;
+const K: usize = 6; // 2^K constraints
+
+fn setup_groth16_single() -> (
+    garbled_groth16::GarblerInput,
+    garbled_groth16::SnarkProof,
+    garbled_groth16::PublicParams,
+) {
+    let mut rng = ChaCha20Rng::seed_from_u64(12345);
+    let circuit = DummyCircuit::<ark::Fr> {
+        a: Some(ark::Fr::rand(&mut rng)),
+        b: Some(ark::Fr::rand(&mut rng)),
+        num_variables: 10,
+        num_constraints: 1 << K,
+    };
+
+    info!("Setting up Groth16 proof (single, shared across garbling instances)...");
+    let (pk, vk) = ark::Groth16::<ark::Bn254>::setup(circuit, &mut rng).expect("setup");
+    info!("Proof generated successfully");
+
+    let proof = ark::Groth16::<ark::Bn254>::prove(&pk, circuit, &mut rng).expect("prove");
+    let public_param = vec![circuit.a.unwrap() * circuit.b.unwrap()];
+
+    let garbler_input = garbled_groth16::GarblerInput {
+        public_params_len: public_param.len(),
+        vk: vk.clone(),
+    };
+
+    (garbler_input, proof, public_param)
+}
 
 fn build_pinned_pool(n_threads: usize) -> ThreadPool {
     let chosen_cores = match core_affinity::get_core_ids() {
@@ -132,25 +161,66 @@ impl HashWithGate<1> for SwankyAesHasher {
     }
 }
 
-#[derive(Default)]
-struct Blake3CiphertextHasher {
+const CT_BYTES: usize = 16;
+const BLAKE3_CT_BATCH: usize = 1024; // 16 KiB per flush keeps BLAKE3 on its fast path and minimizes update calls.
+
+struct Blake3AccumulatingCiphertextHasher<const BATCH: usize> {
     hasher: blake3::Hasher,
+    buf: [[u8; CT_BYTES]; BATCH],
+    len: usize, // number of ciphertexts currently buffered
 }
 
-impl garbled_snark_verifier::circuit::MultiCiphertextHandler<1> for Blake3CiphertextHasher {
+impl<const BATCH: usize> Default for Blake3AccumulatingCiphertextHasher<BATCH> {
+    fn default() -> Self {
+        Self {
+            hasher: blake3::Hasher::new(),
+            buf: [[0u8; CT_BYTES]; BATCH],
+            len: 0,
+        }
+    }
+}
+
+impl<const BATCH: usize> Blake3AccumulatingCiphertextHasher<BATCH> {
+    #[inline(always)]
+    fn flush(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        let used = self.len;
+        let bytes_len = used * CT_BYTES;
+        // SAFETY: buf is a tightly packed [[u8; 16]; BATCH]; we only read the initialized prefix.
+        let flat: &[u8] =
+            unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const u8, bytes_len) };
+        self.hasher.update(flat);
+        self.len = 0;
+    }
+}
+
+impl<const BATCH: usize> garbled_snark_verifier::circuit::MultiCiphertextHandler<1>
+    for Blake3AccumulatingCiphertextHasher<BATCH>
+{
     type Result = [u8; 32];
 
+    #[inline(always)]
     fn handle(&mut self, cts: [S; 1]) {
-        self.hasher.update(&cts[0].to_bytes());
+        self.buf[self.len].copy_from_slice(&cts[0].to_bytes());
+        self.len += 1;
+        if self.len == BATCH {
+            self.flush();
+        }
     }
 
-    fn finalize(self) -> Self::Result {
+    #[inline(always)]
+    fn finalize(mut self) -> Self::Result {
+        self.flush();
         let out = self.hasher.finalize();
         let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(out.as_slice());
+        bytes.copy_from_slice(out.as_ref());
         bytes
     }
 }
+
+type Blake3CiphertextHasher = Blake3AccumulatingCiphertextHasher<BLAKE3_CT_BATCH>;
 
 #[derive(Default)]
 struct Sha256CiphertextHasher {
@@ -204,6 +274,55 @@ impl garbled_snark_verifier::circuit::MultiCiphertextHandler<1> for SwankyCipher
     }
 }
 
+fn run_without_ciphertext_handler<H: GateHasher + Send + 'static>(
+    gate_hasher_label: &str,
+    garbling_seed: u64,
+    instance: usize,
+    garbler_input: garbled_groth16::GarblerInput,
+    proof: garbled_groth16::SnarkProof,
+    public_params: garbled_groth16::PublicParams,
+) {
+    let inputs = garbler_input.clone();
+
+    let garble_start = Instant::now();
+    let garbling_result: StreamingResult<GarbleMode<H, ()>, _, GarbledWire> = {
+        let _span = info_span!("garble", instance, seed = garbling_seed).entered();
+        CircuitBuilder::streaming_garbling(
+            inputs.clone(),
+            CAPACITY,
+            garbling_seed,
+            (),
+            garbled_groth16::verify,
+        )
+    };
+    info!("garbling: in {:.3}s", garble_start.elapsed().as_secs_f64());
+
+    let GarbledWire { label0, label1 } = *garbling_result.output_labels();
+
+    let input_labels = garbled_groth16::EvaluatorInput::new(
+        public_params,
+        proof,
+        garbler_input.vk.clone(),
+        garbling_result.input_wire_values.clone(),
+    );
+
+    info!(
+        "SafeGarbleMode (gate={gate_hasher_label}, ct=none):\n  Label0: {:?}\n  Label1: {:?}\n  CiphertextHash: (disabled)",
+        label0, label1
+    );
+
+    info!(
+        "Evaluator input prepared: output_label0_hash=0x{}, output_label1_hash=0x{}, input_labels={} wires",
+        to_hex(&hash(&label0.to_bytes())),
+        to_hex(&hash(&label1.to_bytes())),
+        input_labels.public.iter().map(|w| w.0.len()).sum::<usize>()
+            + input_labels.a.iter().count()
+            + input_labels.b.x.iter().map(|fr| fr.0.len()).sum::<usize>()
+            + input_labels.b.y.iter().map(|fr| fr.0.len()).sum::<usize>()
+            + input_labels.c.iter().count()
+    );
+}
+
 fn run_with_hashers<
     H: GateHasher + Send + 'static,
     CTH: CiphertextHandler + Default + Send + 'static,
@@ -212,26 +331,13 @@ fn run_with_hashers<
     ct_hasher_label: &str,
     garbling_seed: u64,
     instance: usize,
+    garbler_input: garbled_groth16::GarblerInput,
+    proof: garbled_groth16::SnarkProof,
+    public_params: garbled_groth16::PublicParams,
 ) where
     <CTH as CiphertextHandler>::Result: Send + Eq + AsRef<[u8]>,
 {
-    let k = 6; // 2^k constraints
-    let mut rng = ChaCha20Rng::seed_from_u64(garbling_seed);
-    let circuit = DummyCircuit::<ark::Fr> {
-        a: Some(ark::Fr::rand(&mut rng)),
-        b: Some(ark::Fr::rand(&mut rng)),
-        num_variables: 10,
-        num_constraints: 1 << k,
-    };
-
-    info!("Setting up Groth16 proof...");
-    let (pk, vk) = ark::Groth16::<ark::Bn254>::setup(circuit, &mut rng).expect("setup");
-    info!("Proof generated successfully");
-
-    let inputs = garbled_groth16::GarblerInput {
-        public_params_len: 1,
-        vk: vk.clone(),
-    };
+    let inputs = garbler_input.clone();
 
     let garble_start = Instant::now();
     let garbling_result: StreamingResult<GarbleMode<H, CTH>, _, GarbledWire> = {
@@ -250,14 +356,10 @@ fn run_with_hashers<
     let ciphertext_hash = garbling_result.ciphertext_handler_result;
     let ciphertext_hash_hex = to_hex(ciphertext_hash.as_ref());
 
-    // Produce a proof to show evaluator inputs hookup.
-    let proof = ark::Groth16::<ark::Bn254>::prove(&pk, circuit, &mut rng).expect("prove");
-    let public_param = vec![circuit.a.unwrap() * circuit.b.unwrap()];
-
     let input_labels = garbled_groth16::EvaluatorInput::new(
-        public_param,
+        public_params,
         proof,
-        vk.clone(),
+        garbler_input.vk.clone(),
         garbling_result.input_wire_values.clone(),
     );
 
@@ -324,8 +426,8 @@ fn parse_args() -> CliArgs {
 
     CliArgs {
         instances: instances.unwrap_or_else(|| "single".to_string()),
-        gate_hasher: gate_hasher.unwrap_or_else(|| "blake3".to_string()),
-        ciphertext_hasher: ct_hasher.unwrap_or_else(|| "aes".to_string()),
+        gate_hasher: gate_hasher.unwrap_or_else(|| "aes".to_string()),
+        ciphertext_hasher: ct_hasher.unwrap_or_else(|| "blake3".to_string()),
     }
 }
 
@@ -334,6 +436,9 @@ fn run_with_ciphertext_hasher<H: GateHasher + Send + 'static>(
     gate_hasher_label: &str,
     seeds: &[u64],
     pool: &ThreadPool,
+    garbler_input: &garbled_groth16::GarblerInput,
+    proof: &garbled_groth16::SnarkProof,
+    public_params: &garbled_groth16::PublicParams,
 ) {
     pool.install(|| match ciphertext_hasher {
         "blake3" => {
@@ -344,6 +449,9 @@ fn run_with_ciphertext_hasher<H: GateHasher + Send + 'static>(
                     "BLAKE3",
                     *seed,
                     idx,
+                    garbler_input.clone(),
+                    proof.clone(),
+                    public_params.clone(),
                 )
             });
         }
@@ -355,6 +463,9 @@ fn run_with_ciphertext_hasher<H: GateHasher + Send + 'static>(
                     "SHA-256",
                     *seed,
                     idx,
+                    garbler_input.clone(),
+                    proof.clone(),
+                    public_params.clone(),
                 )
             });
         }
@@ -366,18 +477,28 @@ fn run_with_ciphertext_hasher<H: GateHasher + Send + 'static>(
                     "SwankyAES",
                     *seed,
                     idx,
+                    garbler_input.clone(),
+                    proof.clone(),
+                    public_params.clone(),
                 )
             });
         }
-        "aes" | "" => {
-            info!("Using AES ciphertext hasher");
+        "none" => {
+            info!("Using no ciphertext handler");
             seeds.par_iter().enumerate().for_each(|(idx, seed)| {
-                run_with_hashers::<H, AESAccumulatingHash>(gate_hasher_label, "AES", *seed, idx)
+                run_without_ciphertext_handler::<H>(
+                    gate_hasher_label,
+                    *seed,
+                    idx,
+                    garbler_input.clone(),
+                    proof.clone(),
+                    public_params.clone(),
+                )
             });
         }
         other => {
             panic!(
-                "Unknown ciphertext hasher '{other}'. Supported: aes, blake3, sha256, swankyaes."
+                "Unknown ciphertext hasher '{other}'. Supported: blake3, sha256, swankyaes, none."
             );
         }
     })
@@ -411,8 +532,24 @@ fn main() {
     let n_threads = num_instances;
     let pool = build_pinned_pool(n_threads);
 
+    // Perform Groth16 setup and proof generation once, then reuse across garbling instances.
+    let (garbler_input, proof, public_params) = setup_groth16_single();
+
     // Add new hashers by extending these matches.
     match gate_hasher.as_str() {
+        "aes" => {
+            garbled_snark_verifier::warn_if_software_aes();
+            info!("Using AES-NI gate hasher (or software fallback)");
+            run_with_ciphertext_hasher::<AesNiHasher>(
+                &ciphertext_hasher,
+                "AES-NI",
+                &seeds,
+                &pool,
+                &garbler_input,
+                &proof,
+                &public_params,
+            );
+        }
         "sha256" => {
             info!("Using SHA-256 gate hasher");
             run_with_ciphertext_hasher::<Sha256GateHasher>(
@@ -420,6 +557,9 @@ fn main() {
                 "SHA-256",
                 &seeds,
                 &pool,
+                &garbler_input,
+                &proof,
+                &public_params,
             );
         }
         "swankyaes" => {
@@ -429,14 +569,25 @@ fn main() {
                 "SwankyAES",
                 &seeds,
                 &pool,
+                &garbler_input,
+                &proof,
+                &public_params,
             );
         }
         "blake3" => {
             info!("Using BLAKE3 gate hasher");
-            run_with_ciphertext_hasher::<Blake3Hasher>(&ciphertext_hasher, "BLAKE3", &seeds, &pool);
+            run_with_ciphertext_hasher::<Blake3Hasher>(
+                &ciphertext_hasher,
+                "BLAKE3",
+                &seeds,
+                &pool,
+                &garbler_input,
+                &proof,
+                &public_params,
+            );
         }
         other => {
-            panic!("Unknown gate hasher '{other}'. Supported: blake3, sha256, swankyaes.");
+            panic!("Unknown gate hasher '{other}'. Supported: aes, blake3, sha256, swankyaes.");
         }
     }
 }
