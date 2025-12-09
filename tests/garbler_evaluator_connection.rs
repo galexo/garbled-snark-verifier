@@ -11,10 +11,10 @@ use garbled_snark_verifier::{
         modes::{EvaluateMode, GarbleMode},
     },
     garbled_groth16,
-    hashers::{AesNiHasher, Blake3Hasher, GateHasher},
+    hashers::{AesCcrGateHasher, Blake3Hasher, GateHasher},
 };
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand_chacha::{ChaCha20Rng, ChaChaRng};
 
 // Simple multiplicative circuit for testing
 #[derive(Copy, Clone)]
@@ -87,7 +87,7 @@ fn run_garbler_evaluator_test<H: GateHasher + 'static>(garbling_seed: u64) {
     let (ciphertext_sender, ciphertext_receiver) = crossbeam::channel::unbounded();
 
     let mut preallocated_wires =
-        GarbleMode::<AesNiHasher, ()>::preallocate_input(garbling_seed, &inputs_for_initial);
+        GarbleMode::<H, ()>::preallocate_input(garbling_seed, &inputs_for_initial);
     let false_wire = preallocated_wires.remove(0);
     let true_wire = preallocated_wires.remove(0);
 
@@ -95,6 +95,12 @@ fn run_garbler_evaluator_test<H: GateHasher + 'static>(garbling_seed: u64) {
     let vk_garbler = vk.clone();
     let vk_evaluator = vk.clone();
     let proof_clone = proof.clone();
+
+    // Derive same gate_hasher from same seed as garbling (for evaluator)
+    let gate_hasher = {
+        let mut rng = ChaChaRng::seed_from_u64(garbling_seed);
+        H::from_rng(&mut rng)
+    };
 
     // Garbler thread
     let garbler = thread::spawn(move || {
@@ -130,6 +136,7 @@ fn run_garbler_evaluator_test<H: GateHasher + 'static>(garbling_seed: u64) {
                 CAPACITY,
                 true_wire.select(true).to_u128(),
                 false_wire.select(false).to_u128(),
+                gate_hasher,
                 ciphertext_receiver,
                 garbled_groth16::verify,
             );
@@ -157,10 +164,10 @@ fn run_garbler_evaluator_test<H: GateHasher + 'static>(garbling_seed: u64) {
 
 #[test]
 #[ignore]
-fn test_garbler_evaluator_connection_aes() {
+fn test_garbler_evaluator_connection_swankyaes() {
     garbled_snark_verifier::init_tracing();
     let garbling_seed: u64 = rand::thread_rng().r#gen();
-    run_garbler_evaluator_test::<AesNiHasher>(garbling_seed);
+    run_garbler_evaluator_test::<AesCcrGateHasher>(garbling_seed);
 }
 
 #[test]

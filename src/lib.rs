@@ -1,4 +1,3 @@
-pub mod cac;
 pub mod ciphertext_hasher;
 pub mod circuit;
 mod core;
@@ -18,8 +17,8 @@ pub use crate::circuit::modes::EvaluatedWire;
 pub use crate::circuit::modes::GarbledWire;
 // Root-level hasher exports
 pub use crate::hashers::{
+    AesCcrGateHasher,
     AesLabelCommitHasher,
-    AesNiHasher,
     Blake3Hasher,
     GateHasher,
     HasherKind,
@@ -30,7 +29,9 @@ pub use crate::hashers::{
 };
 pub type DefaultHasher = crate::hashers::Blake3Hasher;
 
-pub use ciphertext_hasher::{AESAccumulatingHash, AESAccumulatingHashBatch};
+pub use ciphertext_hasher::{
+    Blake3AccumulatingHash, Blake3AccumulatingHashBatch, Blake3HashBatchResult,
+};
 pub use circuit::CircuitContext;
 pub use circuit_component_macro::component;
 // Publicly re-export commonly used BN254 wire types for examples/binaries
@@ -73,10 +74,6 @@ pub mod ark {
     pub use ark_serialize;
     pub use ark_snark::{CircuitSpecificSetupSNARK, SNARK};
 }
-
-// Re-export OpenCommit from cut_and_choose for backward compatibility
-pub use cut_and_choose::{OpenCommit, groth16 as groth16_cut_and_choose};
-pub use groth16_cut_and_choose::{CommitPhaseOne, CommitPhaseTwo, Garbler, OpenForInstance};
 
 #[cfg(feature = "sp1-soldering")]
 pub mod sp1_soldering;

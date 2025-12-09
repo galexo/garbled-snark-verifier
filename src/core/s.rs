@@ -27,13 +27,29 @@ impl S {
     }
 
     #[inline]
+    pub const fn from_le_bytes(bytes: [u8; S_SIZE]) -> Self {
+        Self(u128::from_le_bytes(bytes))
+    }
+
+    #[inline]
     pub fn to_bytes(&self) -> [u8; S_SIZE] {
         self.0.to_be_bytes()
     }
 
     #[inline]
+    pub fn to_le_bytes(&self) -> [u8; S_SIZE] {
+        self.0.to_le_bytes()
+    }
+
+    #[inline]
     pub fn write_bytes(&self, out: &mut [u8; S_SIZE]) {
         *out = self.0.to_be_bytes();
+    }
+
+    /// Write bytes in little-endian format (zero-cost on x86/ARM).
+    #[inline]
+    pub fn write_bytes_le(&self, out: &mut [u8; S_SIZE]) {
+        *out = self.0.to_le_bytes();
     }
 
     #[inline]

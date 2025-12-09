@@ -17,9 +17,10 @@ description = "Garbled-circuit SNARK verifier using Groth16 (BN254), with reusab
 resolver = "2"
 
 [features]
-default = ["tracing_max_level", "tracing_scopes", "sp1-soldering", "test-utils"]
+default = ["tracing_max_level", "tracing_scopes", "vsss", "sp1-soldering", "test-utils"]
 sp1-soldering = ["sp1-prover", "sp1-core-machine", "sp1-core-executor", "sp1-primitives", "sp1-stark", "dirs", "bincode"]
 test-utils = []
+vsss = ["ark-secp256k1"]
 
 tracing_max_level = ["tracing/max_level_trace", "tracing/release_max_level_info"]
 tracing_scopes = []
@@ -32,14 +33,13 @@ ark-ec = "0.5.0"
 ark-ff = "0.5.0"
 ark-groth16 = "0.5.0"
 ark-relations = "0.5.1"
-ark-secp256k1 = "0.5.0"
+ark-secp256k1 = { version = "0.5.0", optional = true }
 ark-serialize = "0.5.0"
 ark-snark = "0.5.1"
 ark-std = "0.5.0"
 bitvec = "1.0.1"
 blake3 = { version = "1.6.1", features = ["traits-preview"] }
 circuit_component_macro = { path = "circuit_component_macro" }
-core_affinity = "0.8"
 crossbeam = "0.8"
 digest = "0.10"
 itertools = "0.14.0"
@@ -57,7 +57,6 @@ tracing = { version = "0.1.41", features = ["attributes", "std"] }
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "registry"] }
 
-bitcoin = { version = "0.32.7", features = ["rand", "rand-std"] }
 hex = "0.4.3"
 sha2 = "0.10.9"
 
@@ -76,6 +75,7 @@ sp1-sdk = "5.2"
 [dev-dependencies]
 ark-ec = "0.5.0"
 ark-relations = "0.5.0"
+bitcoin = { version = "0.32.7", features = ["rand", "rand-std"] }
 bitcoin-script = { git = "https://github.com/BitVM/rust-bitcoin-script" }
 bitvm = { git = "https://github.com/BitVM/BitVM", branch = "main" }
 k256 = "0.13.4"
@@ -97,7 +97,13 @@ panic = "abort"       # Faster execution, smaller binary
 
 [package.metadata.cargo-udeps.ignore]
 # `cargo-husky` is intentionally present for git hooks and should be ignored by udeps
-development = ["cargo-husky"]
+development = [
+    "cargo-husky",
+    # Used in vsss integration-style tests gated behind the `vsss` feature, which is disabled in the CI udeps run.
+    "bitcoin",
+    "bitcoin-script",
+    "bitvm",
+]
 normal = ["aes"]
 
 [profile.release]
@@ -108,5 +114,29 @@ incremental = false
 strip = "symbols"   # if you don't need debug symbols in release
 
 [[example]]
-name = "groth16_cut_and_choose"
+name = "gsv_soldering"
+required-features = ["sp1-soldering", "test-utils"]
+
+[[example]]
+name = "gsv_vsss"
+required-features = ["vsss", "test-utils"]
+
+[[example]]
+name = "gsv_vanilla"
+required-features = ["test-utils"]
+
+[[example]]
+name = "gsv_execute"
+required-features = ["test-utils"]
+
+[[example]]
+name = "gsv_garble"
+required-features = ["test-utils"]
+
+[[example]]
+name = "gate_count"
+required-features = ["test-utils"]
+
+[[example]]
+name = "soldering"
 required-features = ["sp1-soldering"]

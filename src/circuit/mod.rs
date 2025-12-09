@@ -1,11 +1,12 @@
-use std::{array, fmt::Debug};
+use std::{array, fmt::Debug, marker::PhantomData};
 
 use crossbeam::channel;
 use tracing::info;
 
 use crate::{
-    AESAccumulatingHash, EvaluatedWire, GarbledWire, S, WireId,
-    circuit::component_meta::ComponentMetaBuilder, core::gate_type::GateCount, hashers::GateHasher,
+    Blake3AccumulatingHash, EvaluatedWire, GarbledWire, S, WireId,
+    ciphertext_hasher::HASH_OUTPUT_SIZE, circuit::component_meta::ComponentMetaBuilder,
+    core::gate_type::GateCount, hashers::GateHasher,
 };
 
 mod into_wire_list;
@@ -73,8 +74,7 @@ mod streaming_mode;
 pub use streaming_mode::{StreamingContext, StreamingMode};
 
 pub struct CircuitBuilder<M: CircuitMode> {
-    #[allow(dead_code)]
-    mode: M,
+    _m: PhantomData<M>,
 }
 
 #[derive(Debug)]
@@ -143,15 +143,15 @@ pub trait MultiCiphertextHandler<const N: usize>: Sized {
     fn finalize(self) -> Self::Result;
 }
 
-impl MultiCiphertextHandler<1> for AESAccumulatingHash {
-    type Result = [u8; 16];
+impl MultiCiphertextHandler<1> for Blake3AccumulatingHash {
+    type Result = [u8; HASH_OUTPUT_SIZE];
 
     fn handle(&mut self, cts: [S; 1]) {
         self.update(cts[0]);
     }
 
     fn finalize(self) -> Self::Result {
-        AESAccumulatingHash::finalize(&self)
+        Blake3AccumulatingHash::finalize(self)
     }
 }
 pub type CiphertextSender = channel::Sender<S>;
@@ -252,6 +252,7 @@ impl<H: GateHasher, SRC: CiphertextSource> CircuitBuilder<EvaluateMode<H, SRC>> 
         live_wires_capacity: usize,
         true_wire: u128,
         false_wire: u128,
+        gate_hasher: H,
         source: SRC,
         f: F,
     ) -> StreamingResult<EvaluateMode<H, SRC>, I, O>
@@ -264,6 +265,7 @@ impl<H: GateHasher, SRC: CiphertextSource> CircuitBuilder<EvaluateMode<H, SRC>> 
         CircuitBuilder::run_streaming(
             inputs,
             EvaluateMode::new(
+                gate_hasher,
                 live_wires_capacity,
                 S::from_u128(true_wire),
                 S::from_u128(false_wire),

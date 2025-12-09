@@ -1,63 +1,26 @@
 // An example that creates a Groth16 proof (BN254),
 // then garbles the verification circuit using the new streaming garble mode.
 // Run with:
-//   Default (AES): `RUST_LOG=info cargo run --example groth16_garble --release`
-//   Blake3:        `RUST_LOG=info cargo run --example groth16_garble --release -- --hasher blake3`
+//   Default (Swanky AES): `RUST_LOG=info cargo run --example groth16_garble --release`
+//   Blake3:               `RUST_LOG=info cargo run --example groth16_garble --release -- --hasher blake3`
 
 use std::{env, fmt::Write as _, thread, time::Instant};
 
 use garbled_snark_verifier::{
-    AESAccumulatingHash, EvaluatedWire, GarbledWire,
+    Blake3AccumulatingHash, EvaluatedWire, GarbledWire,
     ark::{self, CircuitSpecificSetupSNARK, SNARK, UniformRand},
+    ciphertext_hasher::HASH_OUTPUT_SIZE,
     circuit::{
         CircuitBuilder, StreamingResult,
         modes::{EvaluateMode, GarbleMode},
     },
     garbled_groth16,
-    hashers::{AesNiHasher, Blake3Hasher, GateHasher},
+    hashers::{AesCcrGateHasher, Blake3Hasher, GateHasher},
+    test_utils::DummyCircuit,
 };
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand_chacha::{ChaCha20Rng, ChaChaRng};
 use tracing::{info, info_span};
-
-// Simple multiplicative circuit used to produce a valid Groth16 proof.
-#[derive(Copy, Clone)]
-struct DummyCircuit<F: ark::PrimeField> {
-    pub a: Option<F>,
-    pub b: Option<F>,
-    pub num_variables: usize,
-    pub num_constraints: usize,
-}
-
-impl<F: ark::PrimeField> ark::ConstraintSynthesizer<F> for DummyCircuit<F> {
-    fn generate_constraints(
-        self,
-        cs: ark::ConstraintSystemRef<F>,
-    ) -> Result<(), ark::SynthesisError> {
-        let a = cs.new_witness_variable(|| self.a.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        let b = cs.new_witness_variable(|| self.b.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        let c = cs.new_input_variable(|| {
-            let a = self.a.ok_or(ark::SynthesisError::AssignmentMissing)?;
-            let b = self.b.ok_or(ark::SynthesisError::AssignmentMissing)?;
-            Ok(a * b)
-        })?;
-
-        // pad witnesses
-        for _ in 0..(self.num_variables - 3) {
-            let _ =
-                cs.new_witness_variable(|| self.a.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        }
-
-        // repeat the same multiplicative constraint
-        for _ in 0..self.num_constraints - 1 {
-            cs.enforce_constraint(ark::lc!() + a, ark::lc!() + b, ark::lc!() + c)?;
-        }
-
-        // final no-op constraint keeps ark-relations happy
-        cs.enforce_constraint(ark::lc!(), ark::lc!(), ark::lc!())?;
-        Ok(())
-    }
-}
 
 enum G2EMsg {
     Commit {
@@ -65,7 +28,7 @@ enum G2EMsg {
         output_label0_hash: [u8; 32],
         /// Hash of the label that proof is correct
         output_label1_hash: [u8; 32],
-        ciphertext_hash: [u8; 16],
+        ciphertext_hash: [u8; HASH_OUTPUT_SIZE],
 
         input_labels: garbled_groth16::EvaluatorInput,
         true_wire: u128,
@@ -108,7 +71,7 @@ fn run_with_hasher<H: GateHasher + 'static>(garbling_seed: u64) {
         vk: vk.clone(),
     };
 
-    let hasher = AESAccumulatingHash::default();
+    let ciphertext_hasher = Blake3AccumulatingHash::default();
 
     info!("Starting garbling of Groth16 verification circuit...");
 
@@ -121,7 +84,7 @@ fn run_with_hasher<H: GateHasher + 'static>(garbling_seed: u64) {
             inputs.clone(),
             CAPACITY,
             garbling_seed,
-            hasher,
+            ciphertext_hasher,
             garbled_groth16::verify,
         )
     };
@@ -172,6 +135,12 @@ fn run_with_hasher<H: GateHasher + 'static>(garbling_seed: u64) {
     let (ciphertext_to_evaluator_sender, ciphertext_to_evaluator_receiver) =
         crossbeam::channel::unbounded();
 
+    // Derive same gate_hasher from same seed as garbling (for evaluator)
+    let gate_hasher = {
+        let mut rng = ChaChaRng::seed_from_u64(garbling_seed);
+        H::from_rng(&mut rng)
+    };
+
     let garbler = thread::spawn(move || {
         evaluator_sender.send(msg).unwrap();
 
@@ -208,7 +177,7 @@ fn run_with_hasher<H: GateHasher + 'static>(garbling_seed: u64) {
         let (proxy_sender, proxy_receiver) = crossbeam::channel::unbounded();
 
         let calculated_ciphertext_hash = std::thread::spawn(move || {
-            let mut hasher = AESAccumulatingHash::default();
+            let mut hasher = Blake3AccumulatingHash::default();
 
             while let Ok(ciphertext) = ciphertext_to_evaluator_receiver.recv() {
                 proxy_sender.send(ciphertext).unwrap();
@@ -227,6 +196,7 @@ fn run_with_hasher<H: GateHasher + 'static>(garbling_seed: u64) {
                 CAPACITY,
                 true_wire,
                 false_wire,
+                gate_hasher,
                 proxy_receiver,
                 garbled_groth16::verify,
             )
@@ -273,7 +243,7 @@ fn main() {
 
     let garbling_seed: u64 = rand::thread_rng().r#gen();
 
-    // Simple parser for `--hasher <name>` or `--hasher=<name>`; defaults to AES
+    // Simple parser for `--hasher <name>` or `--hasher=<name>`; defaults to Swanky AES
     let mut hasher_choice: Option<String> = None;
     let mut args = env::args().skip(1); // skip binary name
     while let Some(arg) = args.next() {
@@ -293,15 +263,13 @@ fn main() {
             info!("Using Blake3 hasher");
             run_with_hasher::<Blake3Hasher>(garbling_seed);
         }
-        Some("aes") | None => {
-            // Warn if hardware AES is not available or not used by this build
-            garbled_snark_verifier::warn_if_software_aes();
-            info!("Using AES-NI hasher (or software fallback)");
-            run_with_hasher::<AesNiHasher>(garbling_seed);
+        Some("swankyaes") | None => {
+            info!("Using Swanky AES hasher");
+            run_with_hasher::<AesCcrGateHasher>(garbling_seed);
         }
         Some(other) => {
             panic!(
-                "Unknown hasher '{}'. Supported: aes, blake3. Defaulting to aes.",
+                "Unknown hasher '{}'. Supported: aes/swankyaes, blake3. Defaulting to aes.",
                 other
             );
         }

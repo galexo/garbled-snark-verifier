@@ -70,7 +70,7 @@ impl AdaptorInfo {
 
         let s = nonce + e * evaluator_secret;
 
-        AdaptorInfo {
+        Self {
             evaluator_nonce_commit: nonce_commit,
             garbler_commit,
             evaluator_s: s,
@@ -115,6 +115,7 @@ impl AdaptorInfo {
 }
 
 /// Represents an adaptor where a valid signature can be produced by revealing any one of the garbler secrets.
+#[derive(Clone)]
 pub struct WideAdaptorInfo(Vec<AdaptorInfo>);
 
 impl WideAdaptorInfo {

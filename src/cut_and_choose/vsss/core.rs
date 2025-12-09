@@ -3,10 +3,39 @@ use std::ops::{Add, Mul};
 use ark_ec::{PrimeGroup, scalar_mul::BatchMulPreprocessing};
 use ark_ff::{BigInteger, Field, One, PrimeField, UniformRand, Zero};
 use ark_secp256k1::{Fr, Projective};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use super::utils::neg_pos_sum_of_powers_of_two;
+use super::types::Canonical;
+
+/// Returns the representation of number with given le bits as minimum number of additions/subtractions with powers of two.
+pub fn neg_pos_sum_of_powers_of_two(bits: Vec<bool>) -> Vec<i8> {
+    let mut len = bits.len();
+    let mut res = vec![0i8; len + 1];
+    let mut l: i32 = -1;
+    for i in 0..len {
+        if !bits[i] {
+            l = -1;
+        } else if i == len - 1 || !bits[i + 1] {
+            if l == -1 {
+                res[i] = 1;
+            } else {
+                res[i + 1] = 1;
+                res[l as usize] = -1;
+            }
+        } else if l == -1 {
+            l = i as i32;
+        }
+    }
+
+    while len > 0 && res[len] == 0 {
+        res.pop();
+        len -= 1;
+    }
+
+    res
+}
 
 pub struct Secp256k1 {
     pub generator: BatchMulPreprocessing<Projective>,
@@ -28,7 +57,7 @@ impl Secp256k1 {
 
     // Replacement of BatchMulPreprocessing::batch_mul, which (1) uses rayon parallelization
     // and (2) converts the result to an affine point instead of a projective point.
-    fn generator_batch_mul(&self, scalars: &[Fr]) -> Vec<Projective> {
+    pub fn generator_batch_mul(&self, scalars: &[Fr]) -> Vec<Projective> {
         scalars.iter().map(|e| self.windowed_mul(e)).collect()
     }
 
@@ -86,7 +115,7 @@ fn precalculated_factorials_and_inverses(n: usize) -> (Vec<Fr>, Vec<Fr>, Vec<Fr>
     let inv: Vec<Fr> = (0..n)
         .map(|i| {
             if i == 0 {
-                Fr::zero() //This should never be used
+                Fr::zero() // This should never be used
             } else {
                 inv_factorial[i] * factorial[i - 1]
             }
@@ -96,17 +125,27 @@ fn precalculated_factorials_and_inverses(n: usize) -> (Vec<Fr>, Vec<Fr>, Vec<Fr>
     (factorial, inv_factorial, inv)
 }
 
-// This polynomial is in the (point, value) form instead of coefficient form (points are integers in range [0, degree] converted to Fr's)
-// It's used both for polynomials with scalar and projective point domains
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Polynomial<T>(Vec<T>);
+
+impl<T: CanonicalSerialize + CanonicalDeserialize> Polynomial<T> {
+    pub fn to_canonical(self) -> Polynomial<Canonical<T>> {
+        Polynomial(self.0.into_iter().map(Canonical).collect())
+    }
+}
+
+impl<T: CanonicalSerialize + CanonicalDeserialize + Clone> Polynomial<Canonical<T>> {
+    pub fn from_canonical(&self) -> Polynomial<T> {
+        Polynomial(self.0.iter().map(|x| x.0.clone()).collect())
+    }
+}
 
 impl<T> Polynomial<T>
 where
     for<'a> T:
         Add<T, Output = T> + Mul<&'a Fr, Output = T> + std::ops::Sub<Output = T> + Clone + Zero,
 {
-    #[allow(dead_code)]
+    #[cfg(test)]
     // naive lagrange interpolation, used for testing
     fn eval_at(&self, x: usize) -> T {
         if x < self.0.len() {
@@ -136,8 +175,8 @@ where
             })
     }
 
-    /// evaluates the function at smallest consecutive integer points bigger than the degree
-    /// functions similar to [`lagrange_interpolate_whole_polynomial`],
+    /// Evaluates the function at smallest consecutive integer points bigger than the degree.
+    /// Functions similar to [`lagrange_interpolate_whole_polynomial`].
     fn eval_at_suffix_points<const USE_TABLES: bool>(&self, n_points: usize) -> Vec<T> {
         let n_known = self.0.len();
         let n = n_known + n_points;
@@ -205,7 +244,7 @@ impl Polynomial<Fr> {
         Self((0..degree + 1).map(|_| Fr::rand(&mut rand)).collect())
     }
 
-    pub fn coefficient_commits(&self, secp: &Secp256k1) -> PolynomialCommits {
+    pub fn coefficient_commits(&self, secp: &Secp256k1) -> PolynomialCommits<Projective> {
         PolynomialCommits(Polynomial(secp.generator_batch_mul(&self.0)))
     }
 
@@ -223,7 +262,7 @@ impl Polynomial<Fr> {
             .collect()
     }
 
-    pub fn share_commits(&self, secp: &Secp256k1, num_shares: usize) -> ShareCommits {
+    pub fn share_commits(&self, secp: &Secp256k1, num_shares: usize) -> ShareCommits<Projective> {
         let shares = self
             .shares(num_shares)
             .into_iter()
@@ -234,14 +273,38 @@ impl Polynomial<Fr> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct PolynomialCommits(Polynomial<Projective>);
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolynomialCommits<T>(Polynomial<T>);
 
-#[derive(Clone, Debug)]
-pub struct ShareCommits(pub Vec<Projective>);
+impl<T: CanonicalSerialize + CanonicalDeserialize> PolynomialCommits<T> {
+    pub fn to_canonical(self) -> PolynomialCommits<Canonical<T>> {
+        PolynomialCommits(self.0.to_canonical())
+    }
+}
 
-impl ShareCommits {
-    pub fn verify(&self, polynomial_commits: &PolynomialCommits) -> Result<(), String> {
+impl<T: CanonicalSerialize + CanonicalDeserialize + Clone> PolynomialCommits<Canonical<T>> {
+    pub fn from_canonical(&self) -> PolynomialCommits<T> {
+        PolynomialCommits(self.0.from_canonical())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShareCommits<T>(pub Vec<T>);
+
+impl<T: CanonicalSerialize + CanonicalDeserialize> ShareCommits<T> {
+    pub fn to_canonical(self) -> ShareCommits<Canonical<T>> {
+        ShareCommits(self.0.into_iter().map(Canonical).collect())
+    }
+}
+
+impl<T: CanonicalSerialize + CanonicalDeserialize + Clone> ShareCommits<Canonical<T>> {
+    pub fn from_canonical(&self) -> ShareCommits<T> {
+        ShareCommits(self.0.iter().map(|x| x.0.clone()).collect())
+    }
+}
+
+impl ShareCommits<Projective> {
+    pub fn verify(&self, polynomial_commits: &PolynomialCommits<Projective>) -> Result<(), String> {
         let n_known = polynomial_commits.0.0.len();
         let n_unknown = self.0.len() - n_known;
         let unknown_points = polynomial_commits
@@ -284,10 +347,10 @@ impl ShareCommits {
     }
 }
 
-/// Returns the values of the polynomial defined by known_points at missing_points, in the given order
-/// Assumes that points in the two sets are disjoint and their union is set of natural numbers smaller than < n (including 0) for n = len(known_points) + len(missing_points)
+/// Returns the values of the polynomial defined by known_points at missing_points, in the given order.
+/// Assumes that points in the two sets are disjoint and their union is set of natural numbers smaller than < n (including 0) for n = len(known_points) + len(missing_points).
 /// Uses the fact that the number of missing points will be small compared to the known ones to evaluate polynomials with factorials
-/// so, assuming field inversion and multiplication complexity are I and M, total complexity is O(I + len(missing_points) * n * M)
+/// so, assuming field inversion and multiplication complexity are I and M, total complexity is O(I + len(missing_points) * n * M).
 pub fn lagrange_interpolate_whole_polynomial(
     known_points: &[(usize, Fr)],
     missing_points: &[usize],

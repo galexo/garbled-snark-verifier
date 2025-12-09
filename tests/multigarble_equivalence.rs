@@ -2,49 +2,16 @@
 // Verifies that for identical seeds, the accumulated ciphertext hashes match lane-by-lane.
 
 use garbled_snark_verifier::{
-    AESAccumulatingHash, AESAccumulatingHashBatch,
+    Blake3AccumulatingHash, Blake3AccumulatingHashBatch,
     ark::{self, CircuitSpecificSetupSNARK, UniformRand},
+    ciphertext_hasher::HASH_OUTPUT_SIZE,
     circuit::{CircuitBuilder, StreamingResult},
     garbled_groth16,
-    hashers::AesNiHasher,
+    hashers::AesCcrGateHasher,
+    test_utils::DummyCircuit,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-
-#[derive(Copy, Clone)]
-struct DummyCircuit<F: ark::PrimeField> {
-    pub a: Option<F>,
-    pub b: Option<F>,
-    pub num_variables: usize,
-    pub num_constraints: usize,
-}
-
-impl<F: ark::PrimeField> ark::ConstraintSynthesizer<F> for DummyCircuit<F> {
-    fn generate_constraints(
-        self,
-        cs: ark::ConstraintSystemRef<F>,
-    ) -> Result<(), ark::SynthesisError> {
-        let a = cs.new_witness_variable(|| self.a.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        let b = cs.new_witness_variable(|| self.b.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        let c = cs.new_input_variable(|| {
-            let a = self.a.ok_or(ark::SynthesisError::AssignmentMissing)?;
-            let b = self.b.ok_or(ark::SynthesisError::AssignmentMissing)?;
-            Ok(a * b)
-        })?;
-
-        for _ in 0..(self.num_variables - 3) {
-            let _ =
-                cs.new_witness_variable(|| self.a.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        }
-
-        for _ in 0..self.num_constraints - 1 {
-            cs.enforce_constraint(ark::lc!() + a, ark::lc!() + b, ark::lc!() + c)?;
-        }
-
-        cs.enforce_constraint(ark::lc!(), ark::lc!(), ark::lc!())?;
-        Ok(())
-    }
-}
 
 #[test]
 #[ignore]
@@ -75,28 +42,35 @@ fn multigarble_vs_sequential_equivalence() {
     let multi = CircuitBuilder::run_streaming::<_, _, Vec<_>>(
         inputs.clone(),
         garbled_snark_verifier::circuit::modes::MultigarblingMode::<
-            AesNiHasher,
-            AESAccumulatingHashBatch<N>,
+            AesCcrGateHasher,
+            Blake3AccumulatingHashBatch<N>,
             N,
-        >::new(cap, seeds, AESAccumulatingHashBatch::<N>::default()),
+        >::new(cap, seeds, Blake3AccumulatingHashBatch::<N>::default()),
         |root, input| vec![garbled_groth16::verify(root, input)],
     );
 
-    let multi_hashes: Vec<[u8; 16]> = multi.ciphertext_handler_result.into_iter().collect();
+    let multi_hashes: Vec<[u8; HASH_OUTPUT_SIZE]> =
+        multi.ciphertext_handler_result.into_iter().collect();
 
-    let mut seq_hashes: Vec<[u8; 16]> = Vec::with_capacity(N);
+    let mut seq_hashes: Vec<[u8; HASH_OUTPUT_SIZE]> = Vec::with_capacity(N);
     for &seed in seeds.iter() {
         let seq: StreamingResult<
-            garbled_snark_verifier::circuit::modes::GarbleMode<AesNiHasher, AESAccumulatingHash>,
+            garbled_snark_verifier::circuit::modes::GarbleMode<
+                AesCcrGateHasher,
+                Blake3AccumulatingHash,
+            >,
             _,
             garbled_snark_verifier::GarbledWire,
         > = CircuitBuilder::<
-            garbled_snark_verifier::circuit::modes::GarbleMode<AesNiHasher, AESAccumulatingHash>,
+            garbled_snark_verifier::circuit::modes::GarbleMode<
+                AesCcrGateHasher,
+                Blake3AccumulatingHash,
+            >,
         >::streaming_garbling(
             inputs.clone(),
             cap,
             seed,
-            AESAccumulatingHash::default(),
+            Blake3AccumulatingHash::default(),
             garbled_groth16::verify,
         );
         seq_hashes.push(seq.ciphertext_handler_result);

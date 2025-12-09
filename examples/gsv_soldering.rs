@@ -8,15 +8,15 @@ use crossbeam::channel;
 #[cfg(feature = "sp1-soldering")]
 use garbled_snark_verifier::sp1_soldering::SolderingProof;
 use garbled_snark_verifier::{
-    CommitPhaseOne, CommitPhaseTwo, EvaluatedWire, OpenForInstance, S,
+    EvaluatedWire, S,
     ark::{
         self, Bn254, CircuitSpecificSetupSNARK, Groth16 as ArkGroth16, ProvingKey as ArkProvingKey,
         SNARK, UniformRand,
     },
     circuit::{CiphertextHandler, CiphertextSender, CircuitBuilder},
-    cut_and_choose::FileCiphertextHandlerProvider,
+    cut_and_choose::soldering::{FileCiphertextHandlerProvider, OpenForInstance, groth16 as ccn},
     garbled_groth16,
-    groth16_cut_and_choose::{self as ccn, EvaluatorCaseInput},
+    test_utils::DummyCircuit,
 };
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -29,25 +29,29 @@ const OUT_DIR: &str = "target/cut_and_choose";
 const K_CONSTRAINTS: u32 = 5; // 2^k constraints
 const IS_PROOF_CORRECT: bool = true;
 const IS_PRE_BOOLEAN_EXEC: bool = false;
+const STREAM_PREALLOC_BYTES: u64 = 43_400_000_000; // ~43.4 GB per ciphertext stream (matches expected file size)
+const STREAM_BOUND_CIPHERTEXTS: usize = (1 << 30) / 16; // cap in-flight ciphertexts to ~1 GiB
 
 // Calculate and display total gates to process
 const GATES_PER_INSTANCE: u64 = 11_174_708_821;
 
-use garbled_snark_verifier::hashers::Sha256LabelCommitHasher as ExampleHasher;
+use garbled_snark_verifier::hashers::{
+    AesCcrGateHasher, Sha256LabelCommitHasher as ExampleLabelHasher,
+};
 
 /// Messages emitted by the Garbler during Setup (spec Steps 1–4).
 enum SetupBroadcast {
     /// Step 1.2 — `Commit₁(i)` for every instance (ciphertext hash, inputs, outputs, constants).
-    Commit1(Vec<CommitPhaseOne<ExampleHasher>>),
+    Commit1(Vec<ccn::CommitPhaseOne<AesCcrGateHasher, ExampleLabelHasher>>),
     /// Step 1.4 — `Commit₂(i)` records with nonce-injected input commitments.
-    Commit2(Vec<CommitPhaseTwo<ExampleHasher>>),
+    Commit2(Vec<ccn::CommitPhaseTwo<ExampleLabelHasher>>),
     /// Step 3 — seeds for all challenge instances (open set).
     OpenSeeds(Vec<(usize, ccn::Seed)>),
     /// Step 4 — SP1-based soldering proof plus per-instance deltas.
     #[cfg(feature = "sp1-soldering")]
     SolderingProof(Box<SolderingProof>),
     /// Base evaluator labels used to derive finalized inputs post-soldering.
-    BaseInput(Box<EvaluatorCaseInput>),
+    BaseInput(Box<ccn::EvaluatorCaseInput>),
 }
 
 /// Messages emitted by the Evaluator during Setup.
@@ -56,45 +60,6 @@ enum SetupResponse<CTH: 'static + Send + CiphertextHandler> {
     Commit2Nonce(S),
     /// Step 2 — finalization challenge specifying the evaluation set plus ciphertext handlers.
     FinalizeChallenge(Vec<(usize, CTH)>),
-}
-
-// Simple multiplicative circuit used to produce a valid Groth16 proof.
-#[derive(Copy, Clone)]
-struct DummyCircuit<F: ark::PrimeField> {
-    pub a: Option<F>,
-    pub b: Option<F>,
-    pub num_variables: usize,
-    pub num_constraints: usize,
-}
-
-impl<F: ark::PrimeField> ark::ConstraintSynthesizer<F> for DummyCircuit<F> {
-    fn generate_constraints(
-        self,
-        cs: ark::ConstraintSystemRef<F>,
-    ) -> Result<(), ark::SynthesisError> {
-        let a = cs.new_witness_variable(|| self.a.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        let b = cs.new_witness_variable(|| self.b.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        let c = cs.new_input_variable(|| {
-            let a = self.a.ok_or(ark::SynthesisError::AssignmentMissing)?;
-            let b = self.b.ok_or(ark::SynthesisError::AssignmentMissing)?;
-            Ok(a * b)
-        })?;
-
-        // pad witnesses
-        for _ in 0..(self.num_variables - 3) {
-            let _ =
-                cs.new_witness_variable(|| self.a.ok_or(ark::SynthesisError::AssignmentMissing))?;
-        }
-
-        // repeat the same multiplicative constraint
-        for _ in 0..self.num_constraints - 1 {
-            cs.enforce_constraint(ark::lc!() + a, ark::lc!() + b, ark::lc!() + c)?;
-        }
-
-        // final no-op constraint keeps ark-relations happy
-        cs.enforce_constraint(ark::lc!(), ark::lc!(), ark::lc!())?;
-        Ok(())
-    }
 }
 
 fn main() {
@@ -179,7 +144,7 @@ fn main() {
 
 #[cfg(not(feature = "sp1-soldering"))]
 fn main() {
-    eprintln!("Requires: cargo run --example groth16_cut_and_choose --features sp1-soldering");
+    eprintln!("Requires: cargo run --example gsv_soldering --features sp1-soldering");
 }
 
 fn run_garbler(
@@ -193,9 +158,9 @@ fn run_garbler(
     let mut seed_rng = ChaCha20Rng::seed_from_u64(rand::thread_rng().r#gen());
 
     info!(
-        "Garbler: {total}/{to_finalize}",
+        "Garbler: {total}/{finalized_count}",
         total = cfg.total(),
-        to_finalize = cfg.to_finalize(),
+        finalized_count = cfg.finalized_count(),
     );
 
     let mut g = ccn::Garbler::create(&mut seed_rng, cfg.clone());
@@ -203,7 +168,7 @@ fn run_garbler(
     // Step 1.2 — Garbler publishes Commit₁ for every instance.
     g2e_tx
         .send(SetupBroadcast::Commit1(
-            g.commit_phase_one::<ExampleHasher>(),
+            g.commit_phase_one::<ExampleLabelHasher>(),
         ))
         .expect("send commits");
 
@@ -215,7 +180,7 @@ fn run_garbler(
     // Step 1.4 — Garbler republishes input commitments blended with the nonce.
     g2e_tx
         .send(SetupBroadcast::Commit2(
-            g.commit_phase_two::<ExampleHasher>(nonce),
+            g.commit_phase_two::<ExampleLabelHasher>(nonce),
         ))
         .expect("send commits");
 
@@ -316,14 +281,18 @@ fn run_evaluator(
 ) -> Vec<(usize, EvaluatedWire)> {
     let mut rng = ChaCha20Rng::seed_from_u64(rand::thread_rng().r#gen());
 
-    let finalize = cfg.to_finalize();
+    let finalize = cfg.finalized_count();
 
     // Step 1.2 — receive Commit₁ batch.
     let SetupBroadcast::Commit1(commits) = g2e_rx.recv().expect("recv commits") else {
         panic!("unexpected message; expected commits")
     };
 
-    let mut eval = ccn::Evaluator::<ExampleHasher>::create(&mut rng, cfg.clone(), commits);
+    let mut eval = ccn::Evaluator::<AesCcrGateHasher, ExampleLabelHasher>::create(
+        &mut rng,
+        cfg.clone(),
+        commits,
+    );
 
     let nonce = eval.get_nonce();
 
@@ -345,7 +314,7 @@ fn run_evaluator(
     let (senders, receivers): (Vec<_>, Vec<_>) = finalize_indices
         .iter()
         .map(|&index| {
-            let (tx, rx) = channel::unbounded::<S>();
+            let (tx, rx) = channel::bounded::<S>(STREAM_BOUND_CIPHERTEXTS);
             ((index, tx), (index, rx))
         })
         .unzip();
@@ -374,7 +343,7 @@ fn run_evaluator(
     eval.full_check_commit(
         open_result,
         &receivers,
-        &FileCiphertextHandlerProvider::new(out_dir.clone(), None).unwrap(),
+        &FileCiphertextHandlerProvider::new(out_dir.clone(), Some(STREAM_PREALLOC_BYTES)).unwrap(),
     )
     .expect("full check commit");
 
