@@ -5,7 +5,7 @@
 
 use std::thread;
 
-use ark_secp256k1::Fr;
+use ark_secp256k1::{Fr, Projective};
 use itertools::Itertools;
 use rand::Rng;
 use rayon::prelude::*;
@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::{
-    Canonical, FinalizeChallenge, FinalizedVsssInstance, OpenVsssInstance, Polynomial, Secp256k1,
-    VsssCommit, transpose, wide_garbling::GarbledWideLabelTable,
+    Canonical, FinalizeChallenge, FinalizedVsssInstance, OpenVsssInstance, Polynomial,
+    PolynomialCommits, Secp256k1, ShareCommits, VsssCommit, transpose,
+    wide_garbling::GarbledWideLabelTable,
 };
 use crate::{
     AesCcrGateHasher, Blake3AccumulatingHash, GarbleMode, GarbledWire, WireId,
@@ -31,6 +32,145 @@ use crate::{
 
 pub type InstanceWideLabelLookup = Vec<GarbledWideLabelTable>;
 
+/// Helper that owns all VSSS-specific state (polynomials, shares, wide tables).
+/// Keeps garbling artifacts (seeds, instances) in the outer garbler.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VSSSContext {
+    pub polynomials: Vec<Polynomial<Canonical<Fr>>>,
+    /// Transposed shares: per-instance, all shares for that instance.
+    pub wide_label_shares: Vec<Vec<Canonical<Fr>>>,
+    /// Wide label lookup tables per instance, built from input labels + shares.
+    pub wide_tables: Vec<InstanceWideLabelLookup>,
+    /// Blake3 hash for each instance's wide table set.
+    pub wide_table_commits: Vec<[u8; 32]>,
+}
+
+impl VSSSContext {
+    pub fn new<I: CircuitInput + Clone>(mut rng: impl Rng, config: &Config<I>) -> Self {
+        let mut x = 0;
+        let allocated = config.input().allocate(|| {
+            x += 1;
+            WireId(x)
+        });
+        let num_inputs = <I as CircuitInput>::collect_wire_ids(&allocated).len();
+
+        // Generate polynomials for chunks of up to 8 input bits.
+        let polynomials = (0..num_inputs)
+            .chunks(8)
+            .into_iter()
+            .flat_map(|chunk| {
+                let num_bits = chunk.count();
+                let num_labels = 2u32.pow(num_bits as u32);
+                (0..num_labels)
+                    .map(|_| Polynomial::rand(&mut rng, config.total - config.finalized_count()))
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        // Shares for every polynomial, transposed to per-instance layout.
+        let coeffs = polynomials
+            .iter()
+            .map(|polynomial| {
+                polynomial
+                    .shares(config.total)
+                    .into_iter()
+                    .map(|(_, share)| share)
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        let wide_label_shares = transpose(&coeffs)
+            .into_iter()
+            .map(|shares| shares.into_iter().map(Canonical).collect())
+            .collect();
+
+        Self {
+            polynomials: polynomials
+                .into_iter()
+                .map(Polynomial::to_canonical)
+                .collect(),
+            wide_label_shares,
+            wide_tables: Vec::new(),
+            wide_table_commits: Vec::new(),
+        }
+    }
+
+    pub fn share_commits<LH: LabelCommitHasher>(&self) -> Vec<ShareCommits<Canonical<Projective>>> {
+        let secp = Secp256k1::new();
+
+        // Convert canonical polynomials back and compute share commitments in parallel.
+        crate::cut_and_choose::get_optimized_pool().install(|| {
+            self.polynomials
+                .par_iter()
+                .map(|polynomial| {
+                    polynomial
+                        .from_canonical()
+                        .share_commits(&secp, self.wide_label_shares.len())
+                        .to_canonical()
+                })
+                .collect()
+        })
+    }
+
+    pub fn polynomial_commits(&self) -> Vec<PolynomialCommits<Canonical<Projective>>> {
+        let secp = Secp256k1::new();
+
+        crate::cut_and_choose::get_optimized_pool().install(|| {
+            self.polynomials
+                .par_iter()
+                .map(|polynomial| {
+                    polynomial
+                        .from_canonical()
+                        .coefficient_commits(&secp)
+                        .to_canonical()
+                })
+                .collect()
+        })
+    }
+
+    pub fn shares_for_instance(&self, idx: usize) -> &[Canonical<Fr>] {
+        &self.wide_label_shares[idx]
+    }
+
+    pub fn shares_for_instance_fr(&self, idx: usize) -> Vec<Fr> {
+        self.wide_label_shares[idx]
+            .iter()
+            .map(|c| c.0)
+            .collect_vec()
+    }
+
+    pub fn attach_input_labels(&mut self, all_input_labels: &[Vec<GarbledWire>]) {
+        assert_eq!(
+            all_input_labels.len(),
+            self.wide_label_shares.len(),
+            "input labels must match number of instances"
+        );
+
+        self.wide_tables = all_input_labels
+            .iter()
+            .zip(self.wide_label_shares.iter())
+            .map(|(input_labels, wide_labels)| {
+                let wide_labels = wide_labels.iter().map(|c| c.0).collect_vec();
+                GarbledWideLabelTable::build_all(&wide_labels, input_labels)
+            })
+            .collect();
+
+        self.wide_table_commits = self
+            .wide_tables
+            .iter()
+            .map(|tables| GarbledWideLabelTable::aggregate_hash(tables))
+            .collect();
+    }
+
+    pub fn wide_table_commits(&self) -> &[[u8; 32]] {
+        &self.wide_table_commits
+    }
+
+    pub fn wide_table_for(&self, idx: usize) -> &InstanceWideLabelLookup {
+        &self.wide_tables[idx]
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "I: Serialize + serde::de::DeserializeOwned, GH: GateHasher")]
 pub struct Garbler<I: CircuitInput + Clone, GH: GateHasher = AesCcrGateHasher> {
@@ -38,8 +178,7 @@ pub struct Garbler<I: CircuitInput + Clone, GH: GateHasher = AesCcrGateHasher> {
     instances: Vec<GarbledInstance<GH>>,
     pub config: Config<I>,
     live_capacity: usize,
-    polynomials: Vec<Polynomial<Canonical<Fr>>>,
-    pub wide_label_tables: Vec<InstanceWideLabelLookup>,
+    vsss: VSSSContext,
 }
 
 impl<I, GH> Garbler<I, GH>
@@ -57,51 +196,18 @@ where
             + Sync
             + Copy,
     {
-        let mut x = 0;
-        let allocated = config.input().allocate(|| {
-            x += 1;
-            WireId(x)
-        });
-        let num_inputs = <I as CircuitInput>::collect_wire_ids(&allocated).len();
-
-        let polynomials = (0..num_inputs)
-            .chunks(8)
-            .into_iter()
-            .flat_map(|chunk| {
-                let num_bits = chunk.count();
-                let num_labels = 2u32.pow(num_bits as u32);
-                (0..num_labels)
-                    .map(|_| Polynomial::rand(&mut rng, config.total - config.finalized_count()))
-                    .collect_vec()
-            })
-            .collect_vec();
-
-        let coeffs = polynomials
-            .iter()
-            .map(|polynomial| {
-                polynomial
-                    .shares(config.total)
-                    .into_iter()
-                    .map(|(_, share)| share)
-                    .collect_vec()
-            })
-            .collect_vec();
-
-        let instance_wide_labels = transpose(&coeffs);
+        let mut vsss = VSSSContext::new(&mut rng, &config);
 
         let seeds = (0..config.total)
             .map(|_| rng.r#gen())
             .collect::<Box<[Seed]>>();
 
         // Use optimized thread pool internally
-        let ret: Vec<_> = crate::cut_and_choose::get_optimized_pool().install(|| {
+        let instances: Vec<_> = crate::cut_and_choose::get_optimized_pool().install(|| {
             seeds
-                .iter()
-                .zip(instance_wide_labels.iter())
-                .collect_vec()
                 .par_iter()
                 .enumerate()
-                .map(|(index, (garbling_seed, wide_labels))| {
+                .map(|(index, garbling_seed)| {
                     let inputs = config.input.clone();
                     let hasher = Blake3AccumulatingHash::default();
 
@@ -117,7 +223,7 @@ where
                     > = CircuitBuilder::streaming_garbling(
                         inputs,
                         live_capacity,
-                        **garbling_seed,
+                        *garbling_seed,
                         hasher,
                         builder,
                     );
@@ -126,31 +232,26 @@ where
                     let gate_hasher_seed = {
                         use rand::SeedableRng;
                         use rand_chacha::ChaChaRng;
-                        let mut rng = ChaChaRng::seed_from_u64(**garbling_seed);
+                        let mut rng = ChaChaRng::seed_from_u64(*garbling_seed);
                         GH::from_rng(&mut rng).seed().clone()
                     };
-                    let instance =
-                        GarbledInstance::<GH>::from_streaming_result(res, gate_hasher_seed);
-                    let tables =
-                        GarbledWideLabelTable::build_all(wide_labels, &instance.input_wire_values);
-
-                    (instance, tables)
+                    GarbledInstance::<GH>::from_streaming_result(res, gate_hasher_seed)
                 })
                 .collect()
         });
 
-        let (instances, wide_label_tables): (Vec<_>, Vec<_>) = ret.into_iter().unzip();
+        let all_input_labels = instances
+            .iter()
+            .map(|instance| instance.input_wire_values.clone())
+            .collect_vec();
+        vsss.attach_input_labels(&all_input_labels);
 
         Self {
             stage: GarblerStage::Generating { seeds },
             instances,
             live_capacity,
             config,
-            polynomials: polynomials
-                .into_iter()
-                .map(Polynomial::to_canonical)
-                .collect(),
-            wide_label_tables,
+            vsss,
         }
     }
 
@@ -159,40 +260,14 @@ where
     where
         LH: LabelCommitHasher,
     {
-        let secp = Secp256k1::new();
-
-        let polynomials = self
-            .polynomials
-            .iter()
-            .map(Polynomial::from_canonical)
-            .collect_vec();
-
-        let (share_commits, polynomial_commits): (Vec<_>, Vec<_>) =
-            crate::cut_and_choose::get_optimized_pool().install(|| {
-                polynomials
-                    .par_iter()
-                    .map(|polynomial| {
-                        let share_commits = polynomial
-                            .share_commits(&secp, self.config.total)
-                            .to_canonical();
-                        let polynomial_commits =
-                            polynomial.coefficient_commits(&secp).to_canonical();
-                        (share_commits, polynomial_commits)
-                    })
-                    .unzip()
-            });
-
         let circuit_commits = self
             .instances
             .iter()
             .map(|x| CommitPhaseOne::<GH, LH>::from_instance(x))
             .collect_vec();
-
-        let garbling_table_commits = self
-            .wide_label_tables
-            .iter()
-            .map(|x| GarbledWideLabelTable::aggregate_hash(x))
-            .collect();
+        let share_commits = self.vsss.share_commits::<LH>();
+        let polynomial_commits = self.vsss.polynomial_commits();
+        let garbling_table_commits = self.vsss.wide_table_commits().to_vec();
         VsssCommit {
             circuit_commits,
             share_commits,
@@ -217,12 +292,6 @@ where
         let seeds = self
             .stage
             .next_stage(indexes_to_finalize.iter().map(|x| x.index).collect());
-
-        let shares = self
-            .polynomials
-            .iter()
-            .map(|x| x.from_canonical().shares(self.config.total))
-            .collect_vec();
 
         let mut finalized_instance_data = Vec::new();
         let mut opened_instance_data = Vec::new();
@@ -263,19 +332,12 @@ where
 
                     finalized_instance_data.push(FinalizedVsssInstance {
                         index,
-                        wide_label_lookup: self.wide_label_tables[index].clone(),
+                        wide_label_lookup: self.vsss.wide_table_for(index).clone(),
                         garbling_thread,
                     });
                 } else {
                     // reveal share
-                    let shares = shares
-                        .iter()
-                        .map(|x| {
-                            let share = x[index];
-                            assert_eq!(index, share.0); // sanity check
-                            Canonical(share.1)
-                        })
-                        .collect_vec();
+                    let shares = self.vsss.shares_for_instance(index).to_vec();
                     opened_instance_data.push(OpenVsssInstance {
                         index,
                         seed: *garbling_seed,
@@ -297,9 +359,6 @@ where
     }
 
     pub fn wide_labels_for(&self, index: usize) -> Vec<Fr> {
-        self.polynomials
-            .iter()
-            .map(|x| x.from_canonical().shares(self.config.total)[index].1)
-            .collect_vec()
+        self.vsss.shares_for_instance_fr(index)
     }
 }

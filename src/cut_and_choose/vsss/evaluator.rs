@@ -27,6 +27,103 @@ use crate::{
     hashers::GateHasher,
 };
 
+/// Helper that owns VSSS-specific commit verification logic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "GH: GateHasher, LH: LabelCommitHasher")]
+pub struct VSSSContext<GH: GateHasher, LH: LabelCommitHasher> {
+    pub commits: VsssCommit<GH, LH>,
+}
+
+impl<GH: GateHasher, LH: LabelCommitHasher> VSSSContext<GH, LH> {
+    pub fn new<I: CircuitInput + Clone>(config: &Config<I>, commits: VsssCommit<GH, LH>) -> Self {
+        let mut x = 0;
+        let allocated = config.input().allocate(|| {
+            x += 1;
+            WireId(x)
+        });
+        let num_inputs = <I as CircuitInput>::collect_wire_ids(&allocated).len();
+
+        let polynomial_commits = commits
+            .polynomial_commits
+            .iter()
+            .map(PolynomialCommits::from_canonical)
+            .collect_vec();
+        let share_commits = commits
+            .share_commits
+            .iter()
+            .map(ShareCommits::from_canonical)
+            .collect_vec();
+
+        let expected_len = (0..num_inputs)
+            .chunks(8)
+            .into_iter()
+            .map(|chunk| {
+                let num_bits = chunk.count();
+                2u32.pow(num_bits as u32) as usize
+            })
+            .sum::<usize>();
+
+        assert_eq!(polynomial_commits.len(), expected_len);
+        assert_eq!(share_commits.len(), expected_len);
+
+        info!("Evaluator: Starting commit verification...");
+
+        // Verifying the polynomials is computationally intensive, so we parallelize it
+        crate::cut_and_choose::get_optimized_pool().install(|| {
+            polynomial_commits
+                .iter()
+                .zip(share_commits.iter())
+                .collect_vec()
+                .into_par_iter()
+                .for_each(|(polynomial_commits, share_commits)| {
+                    share_commits
+                        .verify(polynomial_commits)
+                        .expect("Share commit verification failed");
+                })
+        });
+
+        info!("Evaluator: Finished commit verification...");
+
+        Self { commits }
+    }
+
+    pub fn verify_open_shares(&self, open_instance_data: &[OpenVsssInstance]) -> Result<(), ()> {
+        let secp = Secp256k1::new();
+        let share_commits = &self.commits.share_commits;
+
+        info!("Evaluator: verifying share commits...");
+        share_commits
+            .iter()
+            .enumerate()
+            .par_bridge()
+            .try_for_each(|(i, share_commit)| {
+                let shares = open_instance_data
+                    .iter()
+                    .map(|x| (x.index, x.shares[i].0))
+                    .collect_vec();
+
+                share_commit
+                    .from_canonical()
+                    .verify_shares(&secp, &shares)
+                    .map_err(|_| ())
+            })
+    }
+
+    pub fn verify_wide_tables(
+        &self,
+        index: usize,
+        tables: &InstanceWideLabelLookup,
+    ) -> Result<(), ()> {
+        let expected = self.commits.garbling_table_commits[index];
+        let actual = GarbledWideLabelTable::aggregate_hash(tables);
+        if actual == expected { Ok(()) } else { Err(()) }
+    }
+
+    pub fn circuit_commits(&self) -> &[CommitPhaseOne<GH, LH>] {
+        &self.commits.circuit_commits
+    }
+}
+
 /// VSSS-specific evaluator stage.
 #[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "GH: GateHasher, LH: LabelCommitHasher")]
@@ -34,7 +131,7 @@ pub enum Stage<GH: GateHasher, LH: LabelCommitHasher> {
     #[default]
     Empty,
     Vsss {
-        commits: VsssCommit<GH, LH>,
+        context: VSSSContext<GH, LH>,
     },
 }
 
@@ -45,11 +142,7 @@ impl<GH: GateHasher, LH: LabelCommitHasher> Stage<GH, LH> {
         }
         match self {
             Stage::Empty => None,
-            Stage::Vsss {
-                commits: VsssCommit {
-                    circuit_commits, ..
-                },
-            } => Some(circuit_commits),
+            Stage::Vsss { context } => Some(context.circuit_commits()),
         }
     }
 }
@@ -85,52 +178,6 @@ where
 {
     /// Create a VSSS evaluator from VSSS commits.
     pub fn create(mut rng: impl Rng, config: Config<I>, commits: VsssCommit<GH, LH>) -> Self {
-        let polynomial_commits = commits
-            .polynomial_commits
-            .iter()
-            .map(PolynomialCommits::from_canonical)
-            .collect_vec();
-        let share_commits = commits
-            .share_commits
-            .iter()
-            .map(ShareCommits::from_canonical)
-            .collect_vec();
-
-        let mut x = 0;
-        let allocated = config.input().allocate(|| {
-            x += 1;
-            WireId(x)
-        });
-        let num_inputs = <I as CircuitInput>::collect_wire_ids(&allocated).len();
-
-        let expected_len = (0..num_inputs)
-            .chunks(8)
-            .into_iter()
-            .map(|chunk| {
-                let num_bits = chunk.count();
-                2u32.pow(num_bits as u32) as usize
-            })
-            .sum::<usize>();
-
-        assert_eq!(polynomial_commits.len(), expected_len);
-        assert_eq!(share_commits.len(), expected_len);
-
-        info!("Evaluator: Starting commit verification...");
-
-        // Verifying the polynomials is computationally intensive, so we parallelize it
-        crate::cut_and_choose::get_optimized_pool().install(|| {
-            polynomial_commits
-                .iter()
-                .zip(share_commits.iter())
-                .collect_vec()
-                .into_par_iter()
-                .for_each(|(polynomial_commits, share_commits)| {
-                    share_commits
-                        .verify(polynomial_commits)
-                        .expect("Share commit verification failed");
-                })
-        });
-
         assert!(
             config.finalized_count() <= config.total,
             "finalized_count must be <= total"
@@ -138,7 +185,7 @@ where
 
         assert_eq!(commits.circuit_commits.len(), config.total);
 
-        info!("Evaluator: Finished commit verification...");
+        let context = VSSSContext::new(&config, commits);
 
         // Sample without replacement: shuffle 0..total and take first `finalized_count`
         let mut idxs: Vec<usize> = (0..config.total).collect();
@@ -151,7 +198,7 @@ where
         idxs.sort_unstable();
 
         Self {
-            stage: Stage::Vsss { commits },
+            stage: Stage::Vsss { context },
             finalized_indexes: idxs.into_boxed_slice(),
             config,
             nonce: S::from_u128(rng.r#gen()),
@@ -191,21 +238,17 @@ where
             + Sync
             + Copy,
     {
-        let Stage::Vsss { commits } = &mut self.stage else {
+        let Stage::Vsss { context } = &mut self.stage else {
             panic!(
                 "Can't run regarbling for not filled Evaluator, got stage: {:#?}",
                 self.stage
             );
         };
 
-        let iter = commits.circuit_commits.iter().enumerate();
+        let iter = context.circuit_commits().iter().enumerate();
 
         let inputs = self.config.input.clone();
         let finalized_indexes = &self.finalized_indexes;
-
-        let secp = Secp256k1::new();
-        let share_commits = &commits.share_commits;
-        let garbling_table_commits = &commits.garbling_table_commits;
 
         info!("Evaluator: running share verification and regarbling in parallel...");
 
@@ -214,24 +257,7 @@ where
             .install(|| {
                 rayon::join(
                     // Task 1: Verify share commits (secp256k1)
-                    || {
-                        info!("Evaluator: verifying share commits...");
-                        let result = share_commits.iter().enumerate().par_bridge().try_for_each(
-                            |(i, share_commit)| {
-                                let shares = open_instance_data
-                                    .iter()
-                                    .map(|x| (x.index, x.shares[i].0))
-                                    .collect_vec();
-
-                                share_commit
-                                    .from_canonical()
-                                    .verify_shares(&secp, &shares)
-                                    .map_err(|_| ())
-                            },
-                        );
-                        info!("Evaluator: finished verifying share commits...");
-                        result
-                    },
+                    || context.verify_open_shares(open_instance_data),
                     // Task 2: Regarbling and ciphertext verification
                     || {
                         iter.par_bridge()
@@ -275,9 +301,10 @@ where
                                         .unwrap()
                                         .1
                                         .clone();
-                                    let tables_hash =
-                                        GarbledWideLabelTable::aggregate_hash(&wide_label_lookup);
-                                    if tables_hash != garbling_table_commits[index] {
+                                    if context
+                                        .verify_wide_tables(index, &wide_label_lookup)
+                                        .is_err()
+                                    {
                                         error!("wide label table corrupted");
                                         return Err(());
                                     }
@@ -321,9 +348,7 @@ where
                                         &wide_labels,
                                         &instance.input_wire_values,
                                     );
-                                    let tables_hash =
-                                        GarbledWideLabelTable::aggregate_hash(&tables);
-                                    if tables_hash != garbling_table_commits[index] {
+                                    if context.verify_wide_tables(index, &tables).is_err() {
                                         error!(
                                             "regarbling failed, wide label table hash not equal"
                                         );

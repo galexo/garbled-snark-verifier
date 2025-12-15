@@ -12,8 +12,8 @@ pub use core::{
 };
 
 pub use adaptor::{AdaptorInfo, SignatureBytes, WideAdaptorInfo};
-pub use evaluator::Evaluator;
-pub use garbler::{Garbler, InstanceWideLabelLookup};
+pub use evaluator::{Evaluator, Stage as EvaluatorStage, VSSSContext as EvaluatorVSSSContext};
+pub use garbler::{Garbler, InstanceWideLabelLookup, VSSSContext as GarblerVSSSContext};
 pub use protocol::{
     Challenge, EvaluatorAdaptorSigs, FinalizeChallenge, FinalizedVsssInstance, OpenVsssInstance,
     SetupBroadcast, SetupResponse, VsssCommit, VsssStreamReceivers, encode_input,
