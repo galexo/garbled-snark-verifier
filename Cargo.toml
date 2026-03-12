@@ -18,7 +18,7 @@ resolver = "2"
 
 [features]
 default = ["tracing_max_level", "tracing_scopes", "vsss", "sp1-soldering", "test-utils"]
-sp1-soldering = ["sp1-prover", "sp1-core-machine", "sp1-core-executor", "sp1-primitives", "sp1-stark", "dirs", "bincode"]
+sp1-soldering = ["sp1-prover", "sp1-core-machine", "sp1-core-executor", "sp1-primitives", "sp1-stark", "dirs", "bincode", "sp1-build", "sp1-sdk"]
 test-utils = []
 vsss = ["ark-secp256k1"]
 
@@ -69,8 +69,8 @@ sp1-prover = { version = "5.2", features = ["native-gnark"], optional = true }
 sp1-stark = { version = "5.2", optional = true }
 
 [build-dependencies]
-sp1-build = "5.2"
-sp1-sdk = "5.2"
+sp1-build = { version = "5.2", optional = true }
+sp1-sdk = { version = "5.2", optional = true }
 
 [dev-dependencies]
 ark-ec = "0.5.0"

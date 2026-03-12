@@ -674,4 +674,128 @@ mod vsss_tests {
             assert_eq!(out.value, *expected, "output should equal expected");
         }
     }
+
+    /// Same e2e flow as above, but with width W=1 (2 wide labels per input bit).
+    #[test_log::test]
+    fn cut_and_choose_one_bit_e2e_vsss_width_1() {
+        const CAPACITY: usize = 1000;
+        const W: usize = 1;
+        let mut rng = ChaCha20Rng::seed_from_u64(5678);
+
+        let total = 5usize;
+        let finalize = 2usize;
+
+        // Garbler creates all instances with W=1
+        let cfg_g = Config::new(total, finalize, OneBitGarblerInput);
+        let mut garbler: vsss::Garbler<OneBitGarblerInput, AesCcrGateHasher, W> =
+            vsss::Garbler::create(&mut rng, cfg_g, CAPACITY, one_bit_circuit);
+
+        let commits = garbler.commit::<DefaultLabelCommitHasher>();
+        let circuit_commits = commits.circuit_commits.clone();
+
+        let cfg_e = Config::new(total, finalize, OneBitGarblerInput);
+        let mut evaluator: vsss::Evaluator<
+            OneBitGarblerInput,
+            AesCcrGateHasher,
+            DefaultLabelCommitHasher,
+            W,
+        > = vsss::Evaluator::create(&mut rng, cfg_e, commits);
+
+        let finalize_indices: Vec<usize> = evaluator.finalized_indexes().to_vec();
+
+        let (senders, receivers): (Vec<_>, Vec<_>) = finalize_indices
+            .iter()
+            .map(|&index| {
+                let (tx, rx) = channel::unbounded::<S>();
+                (
+                    FinalizeChallenge {
+                        index,
+                        ciphertext_handler: tx,
+                    },
+                    (index, rx),
+                )
+            })
+            .unzip();
+
+        let (opened_instance_data, finalized_instance_data) =
+            garbler.open_commit(senders, one_bit_circuit);
+
+        let out_dir = PathBuf::from("target/cut_and_choose_test_w1");
+        let handler_provider = FileCiphertextHandlerProvider::new(out_dir.clone(), None)
+            .expect("create sink provider");
+
+        let (wide_label_lookups, threads): (Vec<_>, Vec<_>) = finalized_instance_data
+            .into_iter()
+            .map(|x| ((x.index, x.wide_label_lookup), x.garbling_thread))
+            .unzip();
+
+        evaluator
+            .run_regarbling(
+                &opened_instance_data,
+                &receivers,
+                &handler_provider,
+                CAPACITY,
+                one_bit_circuit,
+                &wide_label_lookups,
+            )
+            .expect("regarbling ok");
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let mut test_cases = Vec::new();
+
+        for (idx, (_, wide_label_lookup)) in
+            finalize_indices.into_iter().zip(wide_label_lookups.iter())
+        {
+            for bit_val in [false, true] {
+                let input = OneBitEvaluatorInput {
+                    bit: bit_val,
+                    label: S::ZERO,
+                };
+
+                let gate_hasher_seed = circuit_commits[idx].gate_hasher_seed();
+                let encoded = encode_input::<AesCcrGateHasher, _>(&input, *gate_hasher_seed);
+
+                // W=1: chunks of 2 wide labels, 1 bit at a time
+                let wide_labels = garbler
+                    .wide_labels_for(idx)
+                    .chunks(1usize << W)
+                    .zip(encoded.chunks(W))
+                    .map(|(wide_labels, bit_vals)| {
+                        let wide_label_idx =
+                            bit_vals.iter().fold(0, |acc, &val| acc * 2 + val as u8);
+                        wide_labels[wide_label_idx as usize]
+                    })
+                    .collect_vec();
+
+                let evaluated_wires = wide_labels
+                    .iter()
+                    .zip(wide_label_lookup.iter())
+                    .flat_map(|(wide_label, wide_label_lookup)| {
+                        wide_label_lookup.lookup_evaluated_wires(wide_label)
+                    })
+                    .collect_vec();
+
+                let input = OneBitEvaluatorInput::from_evaluated_inputs(&evaluated_wires)
+                    .expect("input should be valid");
+
+                test_cases.push((
+                    bit_val,
+                    crate::cut_and_choose::vanilla::EvaluatorCaseInput { index: idx, input },
+                ));
+            }
+        }
+
+        let (expected, test_cases): (Vec<_>, Vec<_>) = test_cases.into_iter().unzip();
+
+        let results = evaluator
+            .evaluate_from(&out_dir, test_cases, CAPACITY, one_bit_circuit)
+            .expect("consistency checks should pass for true inputs");
+
+        for (expected, (_, out)) in expected.iter().zip(results.iter()) {
+            assert_eq!(out.value, *expected, "output should equal expected");
+        }
+    }
 }

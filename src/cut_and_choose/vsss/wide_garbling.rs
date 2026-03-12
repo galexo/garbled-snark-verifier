@@ -138,7 +138,7 @@ mod tests {
 
         let delta = Delta::generate(&mut rng);
 
-        for num_bits in [2, 8] {
+        for num_bits in [1, 2, 8] {
             let num_labels = 2u32.pow(num_bits as u32);
             let bit_labels = (0..num_bits)
                 .map(|_| GarbledWire::random(&mut rng, &delta))
@@ -167,6 +167,41 @@ mod tests {
             }
 
             println!("table size: {}", table.0.iter().flatten().count());
+        }
+    }
+
+    #[test]
+    fn test_build_all_width_1() {
+        let mut rng = thread_rng();
+        let delta = Delta::generate(&mut rng);
+
+        let num_input_bits = 5;
+        let bit_labels = (0..num_input_bits)
+            .map(|_| GarbledWire::random(&mut rng, &delta))
+            .collect_vec();
+        // 2 wide labels per bit with W=1
+        let byte_labels = (0..num_input_bits * 2)
+            .map(|_| Fr::rand(&mut rng))
+            .collect_vec();
+
+        let tables = GarbledWideLabelTable::build_all::<1>(&byte_labels, &bit_labels);
+        assert_eq!(tables.len(), num_input_bits);
+
+        for (bit_idx, table) in tables.iter().enumerate() {
+            // Each table has 2 rows
+            assert_eq!(table.0.len(), 2);
+
+            // label0 key decrypts to label0
+            let wires = table.lookup_evaluated_wires(&byte_labels[bit_idx * 2]);
+            assert_eq!(wires.len(), 1);
+            assert_eq!(wires[0].active_label, bit_labels[bit_idx].label0);
+            assert!(!wires[0].value);
+
+            // label1 key decrypts to label1
+            let wires = table.lookup_evaluated_wires(&byte_labels[bit_idx * 2 + 1]);
+            assert_eq!(wires.len(), 1);
+            assert_eq!(wires[0].active_label, bit_labels[bit_idx].label1);
+            assert!(wires[0].value);
         }
     }
 }
