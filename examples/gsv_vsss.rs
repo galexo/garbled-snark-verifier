@@ -267,7 +267,7 @@ fn run_garbler(
     .input;
     let wide_labels = g.wide_labels_for(challenge.assert_index);
     let gate_hasher_seed = circuit_commits[challenge.assert_index].gate_hasher_seed();
-    let sigs = challenge.compute_signatures::<AesCcrGateHasher, _>(
+    let sigs = challenge.compute_signatures::<8, AesCcrGateHasher, _>(
         &wide_labels,
         &inputs,
         *gate_hasher_seed,
@@ -322,10 +322,10 @@ fn run_evaluator(
 
     info!("Evaluator: setting up adaptor sigs...");
     let adaptor_sigs = {
-        let dummy_sighashes = (0..commits.share_commits.len().div_ceil(256))
+        let dummy_sighashes = (0..commits.share_commits.len().div_ceil(1usize << 8))
             .map(|i| i.to_be_bytes().to_vec())
             .collect_vec();
-        EvaluatorAdaptorSigs::new(
+        EvaluatorAdaptorSigs::new::<8>(
             &mut rng,
             &finalize_indices,
             &commits.share_commits,
@@ -374,7 +374,7 @@ fn run_evaluator(
 
     info!("Evaluator: evaluating wires...");
     let inputs = adaptor_sigs
-        .evaluated_wires(
+        .evaluated_wires::<8>(
             &signatures,
             &wide_label_lookups,
             &open_instance_data,

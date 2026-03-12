@@ -41,7 +41,7 @@ pub struct Challenge<CTH: 'static + Send + CiphertextHandler> {
 }
 
 impl<CTH: 'static + Send + CiphertextHandler> Challenge<CTH> {
-    pub fn compute_signatures<GH, T>(
+    pub fn compute_signatures<const W: usize, GH, T>(
         &self,
         wide_labels: &[Fr],
         val: &T,
@@ -54,8 +54,8 @@ impl<CTH: 'static + Send + CiphertextHandler> Challenge<CTH> {
         let wire_values = encode_input::<GH, T>(val, seed);
 
         wide_labels
-            .chunks(256)
-            .zip(wire_values.chunks(8))
+            .chunks(1usize << W)
+            .zip(wire_values.chunks(W))
             .map(|(wide_labels, bit_vals)| {
                 let wide_label_idx = bit_vals.iter().fold(0, |acc, &val| acc * 2 + val as u8);
                 wide_labels[wide_label_idx as usize]
@@ -152,7 +152,7 @@ pub struct EvaluatorAdaptorSigs {
 }
 
 impl EvaluatorAdaptorSigs {
-    pub fn new(
+    pub fn new<const W: usize>(
         rng: &mut impl Rng,
         finalized_indices: &[usize],
         garbler_commits: &[ShareCommits<Canonical<Projective>>],
@@ -163,7 +163,7 @@ impl EvaluatorAdaptorSigs {
 
         let secret = Fr::rand(rng);
         let adaptor_sigs = garbler_commits
-            .chunks(256)
+            .chunks(1usize << W)
             .zip_eq(sighashes)
             .map(|(chunk, sighash)| {
                 let commits = chunk
@@ -193,7 +193,7 @@ impl EvaluatorAdaptorSigs {
             .collect_vec()
     }
 
-    pub fn evaluated_wires(
+    pub fn evaluated_wires<const W: usize>(
         &self,
         signatures: &[SignatureBytes],
         wide_label_lookups: &[(usize, InstanceWideLabelLookup)],
@@ -221,7 +221,7 @@ impl EvaluatorAdaptorSigs {
                 (
                     x.index, // instance index
                     x.shares
-                        .chunks(256)
+                        .chunks(1usize << W)
                         .zip(value_indices.iter())
                         .map(|(share, index)| share[*index].0) // out of the 256 possible values, use the selected one
                         .collect_vec(),

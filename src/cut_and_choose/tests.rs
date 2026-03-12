@@ -553,7 +553,8 @@ mod vsss_tests {
 
         // Garbler creates all instances
         let cfg_g = Config::new(total, finalize, OneBitGarblerInput);
-        let mut garbler = vsss::Garbler::create(&mut rng, cfg_g, CAPACITY, one_bit_circuit);
+        let mut garbler: vsss::Garbler<OneBitGarblerInput> =
+            vsss::Garbler::create(&mut rng, cfg_g, CAPACITY, one_bit_circuit);
 
         // First phase: commit without nonce
         let commits = garbler.commit::<DefaultLabelCommitHasher>();
@@ -636,7 +637,7 @@ mod vsss_tests {
                 // translate input labels to wide labels
                 let wide_labels = garbler
                     .wide_labels_for(idx)
-                    .chunks(256)
+                    .chunks(1usize << 8)
                     .zip(encoded.chunks(8))
                     .map(|(wide_labels, bit_vals)| {
                         let wide_label_idx =

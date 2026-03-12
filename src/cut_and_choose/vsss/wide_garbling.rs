@@ -11,10 +11,10 @@ const TAG_LEN: usize = 16;
 pub struct GarbledWideLabelTable(Vec<Vec<u8>>);
 
 impl GarbledWideLabelTable {
-    pub fn build_all(byte_labels: &[Fr], bit_labels: &[GarbledWire]) -> Vec<Self> {
+    pub fn build_all<const W: usize>(byte_labels: &[Fr], bit_labels: &[GarbledWire]) -> Vec<Self> {
         byte_labels
-            .chunks(256)
-            .zip(bit_labels.chunks(8))
+            .chunks(1usize << W)
+            .zip(bit_labels.chunks(W))
             .map(|(byte_labels, bit_labels)| GarbledWideLabelTable::new(byte_labels, bit_labels))
             .collect()
     }

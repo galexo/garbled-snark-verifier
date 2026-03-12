@@ -463,7 +463,8 @@ mod vsss_flow {
         let mut rng = ChaCha20Rng::seed_from_u64(40404);
 
         let cfg_g = Config::new(TOTAL_INSTANCES, FINALIZE_INSTANCES, input_true.clone());
-        let mut garbler = vsss::Garbler::create(&mut rng, cfg_g, CAPACITY, build_fq_mul_eq_const);
+        let mut garbler: vsss::Garbler<FqCutAndChooseInput> =
+            vsss::Garbler::create(&mut rng, cfg_g, CAPACITY, build_fq_mul_eq_const);
 
         let commits = garbler.commit::<DefaultLabelCommitHasher>();
         let circuit_commits = commits.circuit_commits.clone();
@@ -525,7 +526,7 @@ mod vsss_flow {
 
                 let wide_labels = garbler
                     .wide_labels_for(idx)
-                    .chunks(256)
+                    .chunks(1usize << 8)
                     .zip(encoded.chunks(8))
                     .map(|(wide_labels, bit_vals)| {
                         let wide_label_idx = bit_vals

@@ -35,7 +35,7 @@ pub type InstanceWideLabelLookup = Vec<GarbledWideLabelTable>;
 /// Helper that owns all VSSS-specific state (polynomials, shares, wide tables).
 /// Keeps garbling artifacts (seeds, instances) in the outer garbler.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct VSSSContext {
+pub struct VSSSContext<const W: usize = 8> {
     pub polynomials: Vec<Polynomial<Canonical<Fr>>>,
     /// Transposed shares: per-instance, all shares for that instance.
     pub wide_label_shares: Vec<Vec<Canonical<Fr>>>,
@@ -45,7 +45,7 @@ pub struct VSSSContext {
     pub wide_table_commits: Vec<[u8; 32]>,
 }
 
-impl VSSSContext {
+impl<const W: usize> VSSSContext<W> {
     pub fn new<I: CircuitInput + Clone>(mut rng: impl Rng, config: &Config<I>) -> Self {
         let mut x = 0;
         let allocated = config.input().allocate(|| {
@@ -56,7 +56,7 @@ impl VSSSContext {
 
         // Generate polynomials for chunks of up to 8 input bits.
         let polynomials = (0..num_inputs)
-            .chunks(8)
+            .chunks(W)
             .into_iter()
             .flat_map(|chunk| {
                 let num_bits = chunk.count();
@@ -151,7 +151,7 @@ impl VSSSContext {
             .zip(self.wide_label_shares.iter())
             .map(|(input_labels, wide_labels)| {
                 let wide_labels = wide_labels.iter().map(|c| c.0).collect_vec();
-                GarbledWideLabelTable::build_all(&wide_labels, input_labels)
+                GarbledWideLabelTable::build_all::<W>(&wide_labels, input_labels)
             })
             .collect();
 
@@ -173,15 +173,15 @@ impl VSSSContext {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "I: Serialize + serde::de::DeserializeOwned, GH: GateHasher")]
-pub struct Garbler<I: CircuitInput + Clone, GH: GateHasher = AesCcrGateHasher> {
+pub struct Garbler<I: CircuitInput + Clone, GH: GateHasher = AesCcrGateHasher, const W: usize = 8> {
     stage: GarblerStage,
     instances: Vec<GarbledInstance<GH>>,
     pub config: Config<I>,
     live_capacity: usize,
-    vsss: VSSSContext,
+    vsss: VSSSContext<W>,
 }
 
-impl<I, GH> Garbler<I, GH>
+impl<I, GH, const W: usize> Garbler<I, GH, W>
 where
     I: CircuitInput + Clone + Send + Sync + EncodeInput<GarbleMode<GH, Blake3AccumulatingHash>>,
     GH: GateHasher + 'static,

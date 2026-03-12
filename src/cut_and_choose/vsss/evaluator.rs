@@ -30,11 +30,11 @@ use crate::{
 /// Helper that owns VSSS-specific commit verification logic.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "GH: GateHasher, LH: LabelCommitHasher")]
-pub struct VSSSContext<GH: GateHasher, LH: LabelCommitHasher> {
+pub struct VSSSContext<GH: GateHasher, LH: LabelCommitHasher, const W: usize = 8> {
     pub commits: VsssCommit<GH, LH>,
 }
 
-impl<GH: GateHasher, LH: LabelCommitHasher> VSSSContext<GH, LH> {
+impl<GH: GateHasher, LH: LabelCommitHasher, const W: usize> VSSSContext<GH, LH, W> {
     pub fn new<I: CircuitInput + Clone>(config: &Config<I>, commits: VsssCommit<GH, LH>) -> Self {
         let mut x = 0;
         let allocated = config.input().allocate(|| {
@@ -55,7 +55,7 @@ impl<GH: GateHasher, LH: LabelCommitHasher> VSSSContext<GH, LH> {
             .collect_vec();
 
         let expected_len = (0..num_inputs)
-            .chunks(8)
+            .chunks(W)
             .into_iter()
             .map(|chunk| {
                 let num_bits = chunk.count();
@@ -127,15 +127,15 @@ impl<GH: GateHasher, LH: LabelCommitHasher> VSSSContext<GH, LH> {
 /// VSSS-specific evaluator stage.
 #[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "GH: GateHasher, LH: LabelCommitHasher")]
-pub enum Stage<GH: GateHasher, LH: LabelCommitHasher> {
+pub enum Stage<GH: GateHasher, LH: LabelCommitHasher, const W: usize = 8> {
     #[default]
     Empty,
     Vsss {
-        context: VSSSContext<GH, LH>,
+        context: VSSSContext<GH, LH, W>,
     },
 }
 
-impl<GH: GateHasher, LH: LabelCommitHasher> Stage<GH, LH> {
+impl<GH: GateHasher, LH: LabelCommitHasher, const W: usize> Stage<GH, LH, W> {
     fn get_commit_if_ready(&self, regarbled: bool) -> Option<&[CommitPhaseOne<GH, LH>]> {
         if !regarbled {
             return None;
@@ -157,6 +157,7 @@ pub struct Evaluator<
     I: CircuitInput + Clone + Serialize + DeserializeOwned,
     GH: GateHasher = AesCcrGateHasher,
     LH: LabelCommitHasher = DefaultLabelCommitHasher,
+    const W: usize = 8,
 > {
     config: Config<I>,
     /// To protect against the second-preimage of input-label hash, this nonce supplements the
@@ -165,10 +166,10 @@ pub struct Evaluator<
     finalized_indexes: Box<[usize]>,
     /// Tracks whether opened instances have been successfully regarbled and verified
     regarbled: bool,
-    stage: Stage<GH, LH>,
+    stage: Stage<GH, LH, W>,
 }
 
-impl<I, GH, LH> Evaluator<I, GH, LH>
+impl<I, GH, LH, const W: usize> Evaluator<I, GH, LH, W>
 where
     I: CircuitInput + Clone + Send + Sync + EncodeInput<GarbleMode<GH, Blake3AccumulatingHash>>,
     <I as CircuitInput>::WireRepr: Send + Sync,
@@ -344,7 +345,7 @@ where
                                         first_commit.gate_hasher_seed().clone(),
                                     );
                                     let wide_labels = info.shares.iter().map(|x| x.0).collect_vec();
-                                    let tables = GarbledWideLabelTable::build_all(
+                                    let tables = GarbledWideLabelTable::build_all::<W>(
                                         &wide_labels,
                                         &instance.input_wire_values,
                                     );
@@ -382,7 +383,7 @@ where
     }
 }
 
-impl<I, GH, LH> Evaluator<I, GH, LH>
+impl<I, GH, LH, const W: usize> Evaluator<I, GH, LH, W>
 where
     I: CircuitInput + Clone + Send + Sync + Serialize + DeserializeOwned,
     GH: GateHasher,
