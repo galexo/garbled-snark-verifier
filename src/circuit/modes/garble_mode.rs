@@ -74,9 +74,22 @@ pub struct GarbleMode<H: hashers::GateHasher, CTH: CiphertextHandler> {
     false_wire: GarbledWire,
     true_wire: GarbledWire,
     gate_hasher: H,
+    /// Seed-anchored garbling (settlement spec §2). When set, an AND gate's
+    /// stored zero-label is replaced by PRF(seed, TAG_ANCHOR||g) and the offset
+    /// r_g = C0 ^ anchor is counted as a leaf, so every downstream gate is
+    /// garbled over the translated label. `None` leaves the scheme unchanged.
+    anchor: Option<anchoring_proxy::AnchorPrf>,
+    /// leaves emitted (one per AND gate) and their byte cost, spec §3
+    pub n_and_leaves: u64,
+    pub f_bytes: u64,
 }
 
 impl<H: hashers::GateHasher, CTH: CiphertextHandler> GarbleMode<H, CTH> {
+    /// Enable seed-anchored garbling with anchors derived from `seed32`.
+    pub fn with_anchoring(mut self, seed32: [u8; 32]) -> Self {
+        self.anchor = Some(anchoring_proxy::AnchorPrf::new(&seed32));
+        self
+    }
     /// Create a new GarbleMode. The gate hasher is derived from the RNG seeded by `seed`.
     pub fn new(capacity: usize, seed: u64, output_handler: CTH) -> Self {
         let mut rng = ChaChaRng::seed_from_u64(seed);
@@ -95,6 +108,9 @@ impl<H: hashers::GateHasher, CTH: CiphertextHandler> GarbleMode<H, CTH> {
             false_wire,
             true_wire,
             gate_hasher,
+            anchor: None,
+            n_and_leaves: 0,
+            f_bytes: 0,
         }
     }
 
@@ -215,6 +231,20 @@ impl<H: GateHasher, CTH: CiphertextHandler> CircuitMode for GarbleMode<H, CTH> {
             gate_id,
         );
 
+        // Seed-anchored garbling (spec §2): after the gate is garbled exactly as
+        // before, replace the stored zero-label with the anchor so every later
+        // gate reads A (and A ^ delta), and account the offset r_g = C0 ^ A.
+        let c_store = match (&self.anchor, ciphertext.is_some()) {
+            (Some(ap), true) => {
+                let a_g = ap.and(gate_id);
+                let _r_g = c_base ^ &a_g;   // leaf payload, 16 B alongside T_g
+                self.n_and_leaves += 1;
+                self.f_bytes += 32;
+                a_g
+            }
+            _ => c_base,
+        };
+
         // Stream the table entry if it exists
         self.stream_table_entry(gate_id, ciphertext);
 
@@ -225,7 +255,7 @@ impl<H: GateHasher, CTH: CiphertextHandler> CircuitMode for GarbleMode<H, CTH> {
         // Persist only label0; guard constants/unreachable
         self.storage
             .set(gate.wire_c, |slot| {
-                *slot = Some(c_base);
+                *slot = Some(c_store);
             })
             .unwrap();
     }
@@ -278,5 +308,4 @@ impl<H: GateHasher, CTH: CiphertextHandler> CircuitMode for GarbleMode<H, CTH> {
 #[cfg(test)]
 mod garble_test;
 
-#[cfg(test)]
-mod anchoring_proxy;
+pub mod anchoring_proxy;

@@ -134,6 +134,10 @@ name = "gsv_garble"
 required-features = ["test-utils"]
 
 [[example]]
+name = "anchored_garble"
+required-features = ["test-utils"]
+
+[[example]]
 name = "gate_count"
 required-features = ["test-utils"]
 
