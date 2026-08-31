@@ -891,6 +891,53 @@ mod tests {
         }
     }
 
+    /// t17: setup cost, before vs after anchoring, on real Bristol circuits.
+    ///
+    /// "Before" is the unmodified scheme: call garble_gate, store the natural
+    /// C0, keep the table. "After" is garble_anchored: same garble_gate, plus
+    /// one PRF and one XOR per non-free gate, and the anchor stored downstream.
+    /// Reports garbling wall time and F bytes for both, which are the setup
+    /// numbers the paper needs and which no measurement covered before.
+    #[test]
+    #[ignore = "timing; run with --ignored"]
+    fn t17_setup_cost_before_after() {
+        println!("{:<14} {:>6} {:>10} {:>12} {:>12} {:>10} {:>10} {:>8}",
+                 "circuit", "K", "gates", "plain_ms", "anchored_ms", "F_plain",
+                 "F_anch", "ratio");
+        for name in ["aes_128.txt", "sha256.txt", "Keccak_f.txt"] {
+            let Some(c) = bristol(name) else { continue };
+            let seed = seed_a();
+            for k in [256usize, 1024] {
+                let plan = plan_anchors(&c, k);
+
+                // ---- before: the unmodified sweep ----
+                let t0 = std::time::Instant::now();
+                let delta = delta_of(&seed);
+                let gh = hasher_of(&seed);
+                let mut l0 = vec![S::ZERO; c.n_wires];
+                for w in 0..c.n_in { l0[w] = label0(&seed, w); }
+                let mut n_ct = 0usize;
+                for (g, gate) in c.gates.iter().enumerate() {
+                    let (cb, ct) = garble_gate(&gh, gate.t, l0[gate.a], l0[gate.b], &delta, g);
+                    if ct.is_some() { n_ct += 1; }
+                    l0[gate.c] = cb;           // natural C0 stored, no translation
+                }
+                let plain_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let f_plain = n_ct * 16;       // table rows only
+
+                // ---- after: anchored ----
+                let t1 = std::time::Instant::now();
+                let gb = garble_anchored(&c, &seed, &plan);
+                let anchored_ms = t1.elapsed().as_secs_f64() * 1000.0;
+                let sz = sizes(&c, &gb, 32);
+
+                println!("{name:<14} {k:>6} {:>10} {:>12.1} {:>12.1} {:>10} {:>10} {:>8.2}",
+                         c.gates.len(), plain_ms, anchored_ms,
+                         f_plain, sz.f_bytes, sz.f_bytes as f64 / f_plain as f64);
+            }
+        }
+    }
+
     /// K sweep on the synthetic circuit: cost per dispute and the 2K bound.
     #[test]
     fn t5_k_sweep() {
