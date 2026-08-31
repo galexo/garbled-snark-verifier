@@ -59,7 +59,7 @@ pub trait CircuitMode: Sized + fmt::Debug {
     /// Instrumentation hooks: called when the streaming builder enters and
     /// leaves a component instance. Default no-ops; a measurement mode
     /// overrides them to record component boundaries against gate indices.
-    fn note_component_enter(&mut self, _key: [u8; 8]) {}
+    fn note_component_enter(&mut self, _key: [u8; 8], _n_in: usize, _n_out: usize) {}
     fn note_component_exit(&mut self, _key: [u8; 8]) {}
 }
 

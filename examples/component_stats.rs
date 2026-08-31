@@ -52,6 +52,11 @@ fn main() {
     println!("top templates by instance count:");
     for (n, k) in v.iter().take(8) { println!("   {:>12} x  key {:02x?}", n, k); }
     println!();
+    println!("total instance INPUTS : {}  (max {}), mean {:.1}",
+             s.total_inputs, s.max_inputs, s.total_inputs as f64 / s.instances.max(1) as f64);
+    println!("total instance outputs: {}  (max {})", s.total_outputs, s.max_outputs);
+    println!("  -> binding table at 5 B/port: {:.2} GB", s.total_inputs as f64 * 5.0 / 1e9);
+    println!();
     println!("wire_c monotonic     : {}   <- false => wire ids are RECYCLED", s.wire_c_monotonic);
     println!("wire_c reuses        : {}", s.wire_c_reused);
     println!("max wire id          : {}  (vs {} gates)", s.max_wire_id, s.gates);

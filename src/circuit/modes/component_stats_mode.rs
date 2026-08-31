@@ -61,6 +61,13 @@ pub struct ComponentStats {
     /// gates whose inputs are not both produced earlier in this instance,
     /// i.e. they cross an instance boundary and need a per-instance binding
     pub cross_boundary_inputs: u64,
+    /// Component arity. Every instance input is a port that must be bound to an
+    /// earlier global gate, so the TOTAL is the size of the per-instance
+    /// binding table -- the term that dominates a gate-indexed ROM.
+    pub total_inputs: u64,
+    pub total_outputs: u64,
+    pub max_inputs: usize,
+    pub max_outputs: usize,
 }
 
 impl ComponentStats {
@@ -110,7 +117,11 @@ impl CircuitMode for ComponentStatsMode {
         self.storage.allocate(None, credits)
     }
 
-    fn note_component_enter(&mut self, key: [u8; 8]) {
+    fn note_component_enter(&mut self, key: [u8; 8], n_in: usize, n_out: usize) {
+        self.stats.total_inputs += n_in as u64;
+        self.stats.total_outputs += n_out as u64;
+        if n_in > self.stats.max_inputs { self.stats.max_inputs = n_in; }
+        if n_out > self.stats.max_outputs { self.stats.max_outputs = n_out; }
         self.open.push((key, self.gate_index));
         self.stats.instances += 1;
         *self.stats.per_template.entry(key).or_insert(0) += 1;
