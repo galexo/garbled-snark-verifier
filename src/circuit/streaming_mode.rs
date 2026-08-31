@@ -170,6 +170,7 @@ impl<M: CircuitMode> CircuitContext for StreamingMode<M> {
             }
             StreamingMode::ExecutionPass(ctx) => {
                 debug!("with_named_child: enter name={key:?} arity={arity}");
+                ctx.mode.note_component_enter(key);
 
                 // Extract per-output remaining-use counters and push to stack
                 let pre_alloc_output_credits = {
@@ -241,6 +242,9 @@ impl<M: CircuitMode> CircuitContext for StreamingMode<M> {
                 }
 
                 debug!("with_named_child: exit name={key:?} arity={arity}");
+                if let StreamingMode::ExecutionPass(ctx) = self {
+                    ctx.mode.note_component_exit(key);
+                }
                 output
             }
         }

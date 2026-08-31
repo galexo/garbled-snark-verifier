@@ -3,8 +3,10 @@ use std::{fmt, num::NonZero};
 use crate::{Gate, WireId, storage::Credits};
 
 mod anchor_stats_mode;
+mod component_stats_mode;
 mod execute_mode;
 pub use anchor_stats_mode::{AnchorStats, AnchorStatsMode};
+pub use component_stats_mode::{ComponentStats, ComponentStatsMode};
 pub use execute_mode::{ExecuteMode, OptionalBoolean};
 // Back-compat alias used widely in tests/gadgets
 pub type Execute = crate::circuit::StreamingMode<ExecuteMode>;
@@ -53,6 +55,12 @@ pub trait CircuitMode: Sized + fmt::Debug {
     fn finalize_ciphertext_accumulator(self) -> Self::CiphertextAcc {
         Self::CiphertextAcc::default()
     }
+
+    /// Instrumentation hooks: called when the streaming builder enters and
+    /// leaves a component instance. Default no-ops; a measurement mode
+    /// overrides them to record component boundaries against gate indices.
+    fn note_component_enter(&mut self, _key: [u8; 8]) {}
+    fn note_component_exit(&mut self, _key: [u8; 8]) {}
 }
 
 // Old Garble struct replaced by new streaming implementation in garble.rs and garble_mode.rs
