@@ -15,6 +15,13 @@ const TAG_WIRE: u8 = 0x01;
 const TAG_DELTA: u8 = 0x02;
 const TAG_ANCHOR: u8 = 0x03;
 const TAG_HASHER: u8 = 0x04;
+/// Spec §1: XOR gates promoted by K-bounding get their OWN tag, distinct from
+/// TAG_ANCHOR, so no anchor encoding can collide with an AND anchor.
+const TAG_XANCH: u8 = 0x05;
+/// Spec §3: domain separation for leaf hashes.
+const TAG_LEAF: u8 = 0x06;
+const LEAF_AND: u8 = 0x00;
+const LEAF_X: u8 = 0x01;
 
 fn prf32(seed: &[u8; 32], tag: u8, idx: u64) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -32,6 +39,13 @@ fn prf(seed: &[u8; 32], tag: u8, idx: u64) -> S {
 
 fn label0(seed: &[u8; 32], wire: usize) -> S { prf(seed, TAG_WIRE, wire as u64) }
 fn anchor(seed: &[u8; 32], gate: usize) -> S { prf(seed, TAG_ANCHOR, gate as u64) }
+/// Anchor label of an XOR gate selected by K-bounding (spec §1, TAG_XANCH).
+fn xanchor(seed: &[u8; 32], gate: usize) -> S { prf(seed, TAG_XANCH, gate as u64) }
+/// The anchor label of whichever kind `g` is; both parties agree because
+/// `plan.anchored` is computed from the public circuit and public K.
+pub fn anchor_of(seed: &[u8; 32], c: &PCircuit, g: usize) -> S {
+    if c.gates[g].t.is_free() { xanchor(seed, g) } else { anchor(seed, g) }
+}
 
 /// Delta's inner field is private, so derive it deterministically through its
 /// own constructor from an indexed-PRF stream. Still a function of the seed only.
@@ -210,8 +224,9 @@ pub fn garble_anchored(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan) -> Garb
                 labels0[gate.c] = a_g;
             }
             None if plan.anchored[g] => {
-                // free gate promoted to an anchor: publish only the offset
-                let a_g = anchor(seed, g);
+                // free gate promoted to an anchor: publish only the offset,
+                // under TAG_XANCH so it cannot collide with an AND anchor
+                let a_g = xanchor(seed, g);
                 leaves.push((S::ZERO, c_base ^ &a_g));
                 leaf_gate.push(g);
                 labels0[gate.c] = a_g;
@@ -241,7 +256,7 @@ pub fn derive(c: &PCircuit, seed: &[u8; 32], gate_of_wire: &[Option<usize>], pla
         let g = gate_of_wire[cur].expect("wire has no producing gate");
         if is_anchor_gate(c, plan, g) {
             st.anchors_touched += 1;
-            memo[cur] = Some(anchor(seed, g));
+            memo[cur] = Some(anchor_of(seed, c, g));
             continue;
         }
         let gate = c.gates[g];
@@ -284,12 +299,29 @@ pub fn xor_depth_stats(c: &PCircuit, plan: &AnchorPlan) -> (usize, f64, usize) {
 }
 
 // ---------- commitment ----------
-pub fn leaf_hash(g: usize, t: S, r: S) -> [u8; 32] {
+/// Spec §3 leaf encoding: `H(TAG_LEAF || type || id || payload)`, fixed widths.
+/// AND payload is `T_g || r_g`; an XOR anchor's payload is `r_x` alone -- it has
+/// no table, so no placeholder is committed.
+pub fn leaf_hash_and(g: usize, t: S, r: S) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
+    h.update(&[TAG_LEAF, LEAF_AND]);
     h.update(&(g as u64).to_le_bytes());
     h.update(&t.to_bytes());
     h.update(&r.to_bytes());
     *h.finalize().as_bytes()
+}
+
+pub fn leaf_hash_x(g: usize, r: S) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&[TAG_LEAF, LEAF_X]);
+    h.update(&(g as u64).to_le_bytes());
+    h.update(&r.to_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Leaf hash for gate `g`, dispatching on whether it is an AND or an XOR anchor.
+pub fn leaf_hash_of(c: &PCircuit, g: usize, t: S, r: S) -> [u8; 32] {
+    if c.gates[g].t.is_free() { leaf_hash_x(g, r) } else { leaf_hash_and(g, t, r) }
 }
 
 fn node(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
@@ -356,7 +388,7 @@ pub fn phi_settle_v2(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan, root: [u8
                      gate_of_wire: &[Option<usize>]) -> (u8, DeriveStats) {
     let mut st = DeriveStats::default();
     if g >= c.gates.len() { return (0, st); }
-    if !merkle_ok(leaf_hash(g, leaf.0, leaf.1), leaf_idx, path, root) { return (0, st); }
+    if !merkle_ok(leaf_hash_of(c, g, leaf.0, leaf.1), leaf_idx, path, root) { return (0, st); }
     if !is_anchor_gate(c, plan, g) { return (0, st); }
 
     let gate = c.gates[g];
@@ -367,7 +399,7 @@ pub fn phi_settle_v2(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan, root: [u8
     let gh = hasher_of(seed);
 
     let (c_base, ct) = garble_gate(&gh, gate.t, a0, b0, &delta, g);
-    let r_exp = c_base ^ &anchor(seed, g);
+    let r_exp = c_base ^ &anchor_of(seed, c, g);
     let t_exp = ct.unwrap_or(S::ZERO);      // anchored free gate publishes no table
     if t_exp != leaf.0 || r_exp != leaf.1 { return (1, st); }
     (0, st)
@@ -395,8 +427,13 @@ pub fn ve(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan, recv_leaves: &[(S, S
 // ---------- size accounting ----------
 pub struct Sizes { pub n_leaf: usize, pub f_bytes: usize, pub witness: usize }
 
-pub fn sizes(gb: &Garbled, path_len: usize) -> Sizes {
-    Sizes { n_leaf: gb.leaves.len(), f_bytes: gb.leaves.len() * 32,
+/// Spec §3: an AND leaf carries `T_g || r_g` (32 B); an XOR anchor carries
+/// `r_x` alone (16 B). Charging 32 B for every leaf overstates F.
+pub fn sizes(c: &PCircuit, gb: &Garbled, path_len: usize) -> Sizes {
+    let f_bytes: usize = gb.leaf_gate.iter()
+        .map(|&g| if c.gates[g].t.is_free() { 16 } else { 32 })
+        .sum();
+    Sizes { n_leaf: gb.leaves.len(), f_bytes,
             witness: 32 + 8 + 32 + 32 * path_len }
 }
 
@@ -416,9 +453,9 @@ mod tests {
         (c, seed, plan, gb)
     }
 
-    fn commit(gb: &Garbled) -> (Vec<[u8; 32]>, [u8; 32]) {
+    fn commit(c: &PCircuit, gb: &Garbled) -> (Vec<[u8; 32]>, [u8; 32]) {
         let hs: Vec<_> = gb.leaves.iter().enumerate()
-            .map(|(i, (t, r))| leaf_hash(gb.leaf_gate[i], *t, *r)).collect();
+            .map(|(i, (t, r))| leaf_hash_of(c, gb.leaf_gate[i], *t, *r)).collect();
         let root = merkle_root(&hs);
         (hs, root)
     }
@@ -460,7 +497,7 @@ mod tests {
     #[test]
     fn t_predicate_honest_and_cheats() {
         let (c, seed, plan, gb) = setup(64, 200, 3, K);
-        let (hs, root) = commit(&gb);
+        let (hs, root) = commit(&c, &gb);
         let li = hs.len() / 2;
         let g = gb.leaf_gate[li];
         let path = merkle_path(&hs, li);
@@ -472,7 +509,7 @@ mod tests {
             let bad = if mutate_t { (gb.leaves[li].0 ^ &S::one(), gb.leaves[li].1) }
                       else { (gb.leaves[li].0, gb.leaves[li].1 ^ &S::one()) };
             let hs2: Vec<_> = hs.iter().cloned().enumerate()
-                .map(|(i, h)| if i == li { leaf_hash(g, bad.0, bad.1) } else { h }).collect();
+                .map(|(i, h)| if i == li { leaf_hash_of(&c, g, bad.0, bad.1) } else { h }).collect();
             let (v, _) = phi_settle_v2(&c, &seed, &plan, merkle_root(&hs2), li, g, bad,
                                        &merkle_path(&hs2, li), &gb.gate_of_wire);
             assert_eq!(v, 1, "corrupt leaf must convict (table={mutate_t})");
@@ -490,7 +527,7 @@ mod tests {
     fn t9_xor_anchor_leaf_is_contestable() {
         let (c, seed, plan, gb) = setup(32, 400, 40, 8);   // small K forces XOR anchors
         assert!(plan.n_xor_anchors > 0, "test needs XOR anchors");
-        let (hs, root) = commit(&gb);
+        let (hs, root) = commit(&c, &gb);
         let li = gb.leaf_gate.iter().position(|&g| c.gates[g].t.is_free())
             .expect("expected an anchored free gate leaf");
         let g = gb.leaf_gate[li];
@@ -501,7 +538,7 @@ mod tests {
 
         let bad = (gb.leaves[li].0, gb.leaves[li].1 ^ &S::one());
         let hs2: Vec<_> = hs.iter().cloned().enumerate()
-            .map(|(i, h)| if i == li { leaf_hash(g, bad.0, bad.1) } else { h }).collect();
+            .map(|(i, h)| if i == li { leaf_hash_of(&c, g, bad.0, bad.1) } else { h }).collect();
         let (v, _) = phi_settle_v2(&c, &seed, &plan, merkle_root(&hs2), li, g, bad,
                                    &merkle_path(&hs2, li), &gb.gate_of_wire);
         assert_eq!(v, 1, "corrupt XOR-anchor offset must convict");
@@ -601,7 +638,7 @@ mod tests {
         let seed = seed_a();
         let plan = plan_anchors(&c, K);
         let gb = garble_anchored(&c, &seed, &plan);
-        let (hs, root) = commit(&gb);
+        let (hs, root) = commit(&c, &gb);
         for li in [0usize, hs.len() / 2, hs.len() - 1] {
             let g = gb.leaf_gate[li];
             let (v, st) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li],
@@ -613,7 +650,7 @@ mod tests {
             }
             let bad = (gb.leaves[li].0, gb.leaves[li].1 ^ &S::one());
             let hs2: Vec<_> = hs.iter().cloned().enumerate()
-                .map(|(i, h)| if i == li { leaf_hash(g, bad.0, bad.1) } else { h }).collect();
+                .map(|(i, h)| if i == li { leaf_hash_of(&c, g, bad.0, bad.1) } else { h }).collect();
             let (v, _) = phi_settle_v2(&c, &seed, &plan, merkle_root(&hs2), li, g, bad,
                                        &merkle_path(&hs2, li), &gb.gate_of_wire);
             assert_eq!(v, 1, "corrupt leaf {li} must convict");
@@ -750,8 +787,8 @@ mod tests {
                 }
                 let n = gb.leaf_gate.len().max(1);
                 let (d_max, d_mean, _) = xor_depth_stats(&c, &plan);
-                let path = merkle_path(&commit(&gb).0, 0).len();
-                let s = sizes(&gb, path);
+                let path = merkle_path(&commit(&c, &gb).0, 0).len();
+                let s = sizes(&c, &gb, path);
                 println!("{name:<12} {k:>6} {:>8} {:>8} {:>9}/{:<8.1} {:>9}/{:<8.1} {:>7}/{:<8.1} {:>10.2} {:>8}",
                          plan.n_xor_anchors, s.n_leaf,
                          a_max, a_sum as f64 / n as f64,
@@ -871,7 +908,7 @@ mod tests {
                 a_sum += st.anchors_touched;
                 n += 1;
             }
-            let s = sizes(&gb, merkle_path(&commit(&gb).0, 0).len());
+            let s = sizes(&c, &gb, merkle_path(&commit(&c, &gb).0, 0).len());
             println!("K={k:<5} xor_anchors={:<5} leaves={:<5} F={:<7}B  anchors max={a_max:<5} mean={:<7.1}  xor_nodes max={x_max}",
                      plan.n_xor_anchors, s.n_leaf, s.f_bytes, a_sum as f64 / n as f64);
             assert!(a_max <= 2 * k, "gate-level bound is 2K, got {a_max} at K={k}");
