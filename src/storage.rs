@@ -90,8 +90,8 @@ impl<K: Debug + Into<usize> + From<usize>, T: Default> Storage<K, T> {
         self.data.capacity()
     }
 
-    /// Test helper: check if a key currently exists in storage without consuming credits
-    #[cfg(test)]
+    /// Check if a key currently exists in storage without consuming credits.
+    /// Used by AnchorStatsMode to mirror wire lifetimes in its side table.
     pub fn contains(&self, key: K) -> bool {
         let index = self.to_index(key);
         self.data.get(index).is_some()

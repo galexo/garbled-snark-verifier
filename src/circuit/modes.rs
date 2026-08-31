@@ -2,7 +2,9 @@ use std::{fmt, num::NonZero};
 
 use crate::{Gate, WireId, storage::Credits};
 
+mod anchor_stats_mode;
 mod execute_mode;
+pub use anchor_stats_mode::{AnchorStats, AnchorStatsMode};
 pub use execute_mode::{ExecuteMode, OptionalBoolean};
 // Back-compat alias used widely in tests/gadgets
 pub type Execute = crate::circuit::StreamingMode<ExecuteMode>;

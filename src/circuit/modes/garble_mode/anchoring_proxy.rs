@@ -763,6 +763,97 @@ mod tests {
         }
     }
 
+    /// t16: the streaming ancestry recurrence must agree with derive().
+    ///
+    /// `AnchorStatsMode` computes anchors_touched / xor_nodes_visited in one
+    /// forward pass, because the Groth16 verifier's 10.4B gates cannot be held
+    /// in memory for plan_anchors + derive. E4's numbers are only worth
+    /// anything if that recurrence reproduces the trusted path exactly, so
+    /// check it against derive() on a real circuit at every K.
+    #[test]
+    #[ignore = "minutes on SHA-256; run with --ignored"]
+    fn t16_streaming_matches_derive() {
+        use std::collections::BTreeSet;
+        let Some(c) = bristol("sha256.txt") else { return };
+        let seed = seed_a();
+
+        for k in [256usize, 512, 1024] {
+            let plan = plan_anchors(&c, k);
+            let gb = garble_anchored(&c, &seed, &plan);
+
+            // trusted: derive() per contestable gate
+            let (mut a_ref, mut x_ref) = (0usize, 0usize);
+            for &g in gb.leaf_gate.iter() {
+                let gate = c.gates[g];
+                let mut memo = vec![None; c.n_wires];
+                let mut st = DeriveStats::default();
+                derive(&c, &seed, &gb.gate_of_wire, &plan, gate.a, &mut memo, &mut st);
+                derive(&c, &seed, &gb.gate_of_wire, &plan, gate.b, &mut memo, &mut st);
+                a_ref = a_ref.max(st.anchors_touched);
+                x_ref = x_ref.max(st.xor_nodes_visited);
+            }
+
+            // streaming: one forward pass carrying (anchors, xors) per live wire
+            let mut left = vec![0u32; c.n_wires];
+            for g in c.gates.iter() {
+                left[g.a] += 1;
+                if g.b != g.a { left[g.b] += 1; }
+            }
+            let mut produced = vec![false; c.n_wires];
+            for g in c.gates.iter() { produced[g.c] = true; }
+            let mut anc: Vec<Option<(BTreeSet<usize>, BTreeSet<usize>)>> = vec![None; c.n_wires];
+            for w in 0..c.n_wires {
+                if !produced[w] {
+                    let mut a = BTreeSet::new();
+                    a.insert(w);
+                    anc[w] = Some((a, BTreeSet::new()));
+                }
+            }
+            let (mut a_str, mut x_str) = (0usize, 0usize);
+            let leaf: BTreeSet<usize> = gb.leaf_gate.iter().copied().collect();
+
+            for (gi, gate) in c.gates.iter().enumerate() {
+                let (sa, xa) = anc[gate.a].clone().expect("live");
+                let (sb, xb) = if gate.b == gate.a { (sa.clone(), xa.clone()) }
+                               else { anc[gate.b].clone().expect("live") };
+
+                if leaf.contains(&gi) {
+                    a_str = a_str.max(sa.union(&sb).count());
+                    x_str = x_str.max(xa.union(&xb).count());
+                }
+
+                let out = if !gate.t.is_free() {
+                    let mut a = BTreeSet::new();
+                    a.insert(c.n_in + gi);
+                    (a, BTreeSet::new())
+                } else {
+                    let merged: BTreeSet<usize> = sa.union(&sb).copied().collect();
+                    if merged.len() > k {
+                        let mut a = BTreeSet::new();
+                        a.insert(c.n_in + gi);
+                        (a, BTreeSet::new())
+                    } else {
+                        let mut xs: BTreeSet<usize> = xa.union(&xb).copied().collect();
+                        xs.insert(gi);
+                        (merged, xs)
+                    }
+                };
+                anc[gate.c] = Some(out);
+
+                left[gate.a] -= 1;
+                if left[gate.a] == 0 && gate.a != gate.c { anc[gate.a] = None; }
+                if gate.b != gate.a {
+                    left[gate.b] -= 1;
+                    if left[gate.b] == 0 && gate.b != gate.c { anc[gate.b] = None; }
+                }
+            }
+
+            println!("K={k:>5}  derive: {a_ref}/{x_ref}   streaming: {a_str}/{x_str}");
+            assert_eq!(a_str, a_ref, "anchors_touched disagree at K={k}");
+            assert_eq!(x_str, x_ref, "xor_nodes_visited disagree at K={k}");
+        }
+    }
+
     /// K sweep on the synthetic circuit: cost per dispute and the 2K bound.
     #[test]
     fn t5_k_sweep() {
