@@ -6,7 +6,7 @@
 //! re-derives any wire from the seed and the public wiring alone.
 
 use super::halfgates_garbling::{degarble_gate, garble_gate};
-use crate::{AesCcrGateHasher, Delta, GateType, S, hashers::GateHasher};
+use crate::{AesCcrGateHasher, Delta, GateType, S, hashers::{GateHasher, HashWithGate}};
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
 
@@ -38,13 +38,48 @@ fn prf(seed: &[u8; 32], tag: u8, idx: u64) -> S {
 }
 
 fn label0(seed: &[u8; 32], wire: usize) -> S { prf(seed, TAG_WIRE, wire as u64) }
-fn anchor(seed: &[u8; 32], gate: usize) -> S { prf(seed, TAG_ANCHOR, gate as u64) }
+/// Anchor PRF over AES-CCR rather than BLAKE3.
+///
+/// One anchor is drawn per non-free gate, so this is the hot path of the whole
+/// garbling sweep; a BLAKE3 call per gate cost 4-5x plain garbling. AES-CCR is
+/// the same primitive the gate hasher already uses, so an anchor is one AES
+/// block. Domain separation is by construction: this hasher's salt is drawn at
+/// a different PRF index from the gate hasher's, and the AND and XOR anchors
+/// use distinct seed-derived bases, so no anchor can collide with a gate hash
+/// or with the other anchor kind.
+#[derive(Clone, Debug)]
+pub struct AnchorPrf { h: AesCcrGateHasher, base_and: S, base_x: S }
+
+impl AnchorPrf {
+    pub fn new(seed: &[u8; 32]) -> Self {
+        let mut rng = ChaChaRng::from_seed(prf32(seed, TAG_HASHER, 1));
+        Self {
+            h: AesCcrGateHasher::from_rng(&mut rng),
+            base_and: prf(seed, TAG_ANCHOR, 0),
+            base_x: prf(seed, TAG_XANCH, 0),
+        }
+    }
+    #[inline(always)]
+    pub fn and(&self, gate: usize) -> S {
+        HashWithGate::<1>::hash_with_gate(&self.h, &[self.base_and], gate)[0]
+    }
+    #[inline(always)]
+    pub fn xor(&self, gate: usize) -> S {
+        HashWithGate::<1>::hash_with_gate(&self.h, &[self.base_x], gate)[0]
+    }
+    #[inline(always)]
+    pub fn of(&self, c: &PCircuit, g: usize) -> S {
+        if c.gates[g].t.is_free() { self.xor(g) } else { self.and(g) }
+    }
+}
+
+fn anchor(seed: &[u8; 32], gate: usize) -> S { AnchorPrf::new(seed).and(gate) }
 /// Anchor label of an XOR gate selected by K-bounding (spec §1, TAG_XANCH).
-fn xanchor(seed: &[u8; 32], gate: usize) -> S { prf(seed, TAG_XANCH, gate as u64) }
+fn xanchor(seed: &[u8; 32], gate: usize) -> S { AnchorPrf::new(seed).xor(gate) }
 /// The anchor label of whichever kind `g` is; both parties agree because
 /// `plan.anchored` is computed from the public circuit and public K.
 pub fn anchor_of(seed: &[u8; 32], c: &PCircuit, g: usize) -> S {
-    if c.gates[g].t.is_free() { xanchor(seed, g) } else { anchor(seed, g) }
+    AnchorPrf::new(seed).of(c, g)
 }
 
 /// Delta's inner field is private, so derive it deterministically through its
@@ -208,6 +243,7 @@ pub struct Garbled {
 pub fn garble_anchored(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan) -> Garbled {
     let delta = delta_of(seed);
     let gh = hasher_of(seed);
+    let ap = AnchorPrf::new(seed);
     let mut labels0 = vec![S::ZERO; c.n_wires];
     let mut gate_of_wire = vec![None; c.n_wires];
     for w in 0..c.n_in { labels0[w] = label0(seed, w); }
@@ -218,7 +254,7 @@ pub fn garble_anchored(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan) -> Garb
         gate_of_wire[gate.c] = Some(g);
         match ct {
             Some(t) => {
-                let a_g = anchor(seed, g);
+                let a_g = ap.and(g);
                 leaves.push((t, c_base ^ &a_g));
                 leaf_gate.push(g);
                 labels0[gate.c] = a_g;
@@ -226,7 +262,7 @@ pub fn garble_anchored(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan) -> Garb
             None if plan.anchored[g] => {
                 // free gate promoted to an anchor: publish only the offset,
                 // under TAG_XANCH so it cannot collide with an AND anchor
-                let a_g = xanchor(seed, g);
+                let a_g = ap.xor(g);
                 leaves.push((S::ZERO, c_base ^ &a_g));
                 leaf_gate.push(g);
                 labels0[gate.c] = a_g;
@@ -244,6 +280,7 @@ pub struct DeriveStats { pub anchors_touched: usize, pub xor_nodes_visited: usiz
 pub fn derive(c: &PCircuit, seed: &[u8; 32], gate_of_wire: &[Option<usize>], plan: &AnchorPlan,
               w: usize, memo: &mut Vec<Option<S>>, st: &mut DeriveStats) -> S {
     let delta = delta_of(seed);
+    let ap = AnchorPrf::new(seed);
     // `memo` is only written once a free gate's children are resolved, so a wire
     // reachable by two paths could be expanded twice and counted twice. `open`
     // marks expansion start, making each free gate cost exactly one visit.
@@ -256,7 +293,7 @@ pub fn derive(c: &PCircuit, seed: &[u8; 32], gate_of_wire: &[Option<usize>], pla
         let g = gate_of_wire[cur].expect("wire has no producing gate");
         if is_anchor_gate(c, plan, g) {
             st.anchors_touched += 1;
-            memo[cur] = Some(anchor_of(seed, c, g));
+            memo[cur] = Some(ap.of(c, g));
             continue;
         }
         let gate = c.gates[g];
