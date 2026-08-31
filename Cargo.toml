@@ -134,6 +134,9 @@ name = "gsv_garble"
 required-features = ["test-utils"]
 
 [[example]]
+name = "hash_bench"
+
+[[example]]
 name = "component_stats"
 required-features = ["test-utils"]
 

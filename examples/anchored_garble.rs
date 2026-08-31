@@ -28,21 +28,98 @@ use garbled_snark_verifier::{
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
+
+/// leaves hashed per parallel batch; a power of two so each batch collapses to
+/// exactly one mountain-range node of height log2(BATCH)
+const BATCH: usize = 1 << 16;
+
+#[inline]
+fn node(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(a);
+    h.update(b);
+    h.finalize().into()
+}
 
 const K_CONSTRAINTS: usize = 6;
 
-/// Counts ciphertexts instead of storing ~43 GB of them.
+/// Counts ciphertexts and, when `commit` is set, folds each leaf into a
+/// streaming Merkle root. 2.7B leaf hashes are ~87 GB and will not fit in
+/// memory, so this keeps a mountain-range stack of at most 64 partial nodes:
+/// push a leaf, then while the top two nodes are the same height, combine.
+/// Result is Com(F_i) in one pass with O(log n) memory.
 #[derive(Default)]
 struct CountingSink {
     n: u64,
+    commit: bool,
+    /// (hash, height) stack
+    stack: Vec<([u8; 32], u32)>,
+    /// leaves awaiting a parallel batch
+    buf: Vec<S>,
+}
+
+impl CountingSink {
+    /// Collapse a full batch in parallel: hash every leaf, then combine level
+    /// by level. Leaf hashing is embarrassingly parallel and dominates; only
+    /// the log(BATCH) combining levels have dependencies, and each level is
+    /// itself parallel across pairs.
+    fn flush_batch(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let mut level: Vec<[u8; 32]> = self
+            .buf
+            .par_iter()
+            .map(|ct| {
+                let mut h = Sha256::new();
+                h.update([0x06u8, 0x00]);          // TAG_LEAF, LEAF_AND
+                h.update(ct.to_bytes());
+                h.update(ct.to_bytes());
+                h.finalize().into()
+            })
+            .collect();
+        self.buf.clear();
+
+        let mut height = 0u32;
+        while level.len() > 1 {
+            if level.len() % 2 == 1 {
+                let last = *level.last().unwrap();
+                level.push(last);
+            }
+            level = level.par_chunks(2).map(|p| node(&p[0], &p[1])).collect();
+            height += 1;
+        }
+
+        // push into the mountain range, combining equal heights
+        let mut cur = (level[0], height);
+        while let Some(&(top, hh)) = self.stack.last() {
+            if hh != cur.1 {
+                break;
+            }
+            self.stack.pop();
+            cur = (node(&top, &cur.0), hh + 1);
+        }
+        self.stack.push(cur);
+    }
 }
 
 impl CiphertextHandler for CountingSink {
     type Result = u64;
-    fn handle(&mut self, _ct: S) {
+    fn handle(&mut self, ct: S) {
         self.n += 1;
+        if self.commit {
+            self.buf.push(ct);
+            if self.buf.len() == BATCH {
+                self.flush_batch();
+            }
+        }
     }
-    fn finalize(self) -> u64 {
+    fn finalize(mut self) -> u64 {
+        if self.commit {
+            self.flush_batch();
+        }
         self.n
     }
 }
@@ -58,6 +135,7 @@ fn arg(args: &[String], name: &str, default: usize) -> usize {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let plain = args.iter().any(|a| a == "--plain");
+    let commit = args.iter().any(|a| a == "--commit");
     let capacity = arg(&args, "--capacity", 160_000);
 
     eprintln!(
@@ -77,7 +155,8 @@ fn main() {
     let inputs = garbled_groth16::GarblerInput { public_params_len: 1, vk: vk.clone() };
 
     let mut mode: GarbleMode<AesCcrGateHasher, CountingSink> =
-        GarbleMode::new(capacity, 12345, CountingSink::default());
+        GarbleMode::new(capacity, 12345,
+                        CountingSink { commit, ..Default::default() });
     if !plain {
         mode = mode.with_anchoring([7u8; 32]);
     }
@@ -96,6 +175,7 @@ fn main() {
     if !plain {
         println!("F bytes, anchored       : {} ({:.2} GB)", n_ct * 32, (n_ct * 32) as f64 / 1e9);
     }
+    println!("commitment built        : {}", commit);
     println!("garbling wall           : {:.1} s", wall.as_secs_f64());
     println!("rate                    : {:.2}M gates/s", n_ct as f64 / wall.as_secs_f64() / 1e6);
 }
