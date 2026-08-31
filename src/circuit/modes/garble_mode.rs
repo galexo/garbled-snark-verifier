@@ -277,3 +277,6 @@ impl<H: GateHasher, CTH: CiphertextHandler> CircuitMode for GarbleMode<H, CTH> {
 
 #[cfg(test)]
 mod garble_test;
+
+#[cfg(test)]
+mod anchoring_proxy;
