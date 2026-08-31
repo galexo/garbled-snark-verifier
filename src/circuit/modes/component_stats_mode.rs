@@ -51,6 +51,16 @@ pub struct ComponentStats {
     pub overlapping_top: u64,
     /// per-template instance counts, for the size of the template table
     pub per_template: HashMap<[u8; 8], u64>,
+    /// Is wire_c monotonically increasing with gate index? If the streaming
+    /// allocator recycles wire ids, topology cannot be expressed in wire ids
+    /// and descriptors must reference producing GATES instead.
+    pub wire_c_monotonic: bool,
+    pub wire_c_reused: u64,
+    pub max_wire_id: u64,
+    pub last_wire_c: u64,
+    /// gates whose inputs are not both produced earlier in this instance,
+    /// i.e. they cross an instance boundary and need a per-instance binding
+    pub cross_boundary_inputs: u64,
 }
 
 impl ComponentStats {
@@ -142,6 +152,16 @@ impl CircuitMode for ComponentStatsMode {
         }
         self.gate_index += 1;
         self.stats.gates += 1;
+
+        // wire-id stability: decisive for how descriptors can be encoded
+        let wc = gate.wire_c.0 as u64;
+        if self.stats.gates == 1 { self.stats.wire_c_monotonic = true; }
+        if wc <= self.stats.last_wire_c && self.stats.gates > 1 {
+            self.stats.wire_c_monotonic = false;
+            self.stats.wire_c_reused += 1;
+        }
+        self.stats.last_wire_c = wc;
+        if wc > self.stats.max_wire_id { self.stats.max_wire_id = wc; }
 
         #[inline(always)]
         fn eval(g: &GateType, a: bool, b: bool) -> bool {

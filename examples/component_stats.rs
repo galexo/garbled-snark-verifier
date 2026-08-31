@@ -51,5 +51,9 @@ fn main() {
     v.sort_unstable_by(|a,b| b.0.cmp(&a.0));
     println!("top templates by instance count:");
     for (n, k) in v.iter().take(8) { println!("   {:>12} x  key {:02x?}", n, k); }
+    println!();
+    println!("wire_c monotonic     : {}   <- false => wire ids are RECYCLED", s.wire_c_monotonic);
+    println!("wire_c reuses        : {}", s.wire_c_reused);
+    println!("max wire id          : {}  (vs {} gates)", s.max_wire_id, s.gates);
     println!("wall                 : {:.1} s", wall.as_secs_f64());
 }
