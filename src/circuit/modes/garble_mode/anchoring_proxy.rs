@@ -22,6 +22,8 @@ const TAG_XANCH: u8 = 0x05;
 const TAG_LEAF: u8 = 0x06;
 const LEAF_AND: u8 = 0x00;
 const LEAF_X: u8 = 0x01;
+/// Spec §1: commitment to the per-circuit seed, opened at RS.
+const TAG_SEEDCOM: u8 = 0x07;
 
 fn prf32(seed: &[u8; 32], tag: u8, idx: u64) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -419,11 +421,36 @@ pub fn phi_settle_output(c: &PCircuit, seed: &[u8; 32], gate_of_wire: &[Option<u
     if output_commit(l0, &delta) != published[i] { 1 } else { 0 }
 }
 
+// ---------- seed commitment (spec §5) ----------
+
+/// `Com(seed_i)` as posted at Setup: a hiding commitment opened at RS.
+pub fn seed_commit(seed: &[u8; 32], decommit: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&[TAG_SEEDCOM]);
+    h.update(seed);
+    h.update(decommit);
+    *h.finalize().as_bytes()
+}
+
+/// Spec §5: the seed is the ONE case where a failed check convicts the garbler
+/// rather than the accuser, because the seed is garbler-posted data. Every
+/// other structural failure yields 0.
+#[inline]
+pub fn seed_opens(com_seed: &[u8; 32], seed: &[u8; 32], decommit: &[u8; 32]) -> bool {
+    &seed_commit(seed, decommit) == com_seed
+}
+
 // ---------- the predicate (brief §3.1, extended for XOR anchors) ----------
 pub fn phi_settle_v2(c: &PCircuit, seed: &[u8; 32], plan: &AnchorPlan, root: [u8; 32],
                      leaf_idx: usize, g: usize, leaf: (S, S), path: &[[u8; 32]],
-                     gate_of_wire: &[Option<usize>]) -> (u8, DeriveStats) {
+                     gate_of_wire: &[Option<usize>],
+                     com_seed: &[u8; 32], decommit: &[u8; 32]) -> (u8, DeriveStats) {
     let mut st = DeriveStats::default();
+    // Spec §3.1 step 1: the revealed seed must open its commitment. This is
+    // checked FIRST and convicts on failure -- without it a garbler who posts a
+    // wrong seed makes every honest leaf look mis-garbled, inverting the
+    // verdict and slashing the accuser for a real cheat.
+    if !seed_opens(com_seed, seed, decommit) { return (1, st); }
     if g >= c.gates.len() { return (0, st); }
     if !merkle_ok(leaf_hash_of(c, g, leaf.0, leaf.1), leaf_idx, path, root) { return (0, st); }
     if !is_anchor_gate(c, plan, g) { return (0, st); }
@@ -479,6 +506,8 @@ mod tests {
     use super::*;
 
     const K: usize = 1024;
+    /// fixed decommitment for the tests' seed commitment
+    const DEC: [u8; 32] = [0x5au8; 32];
     fn seed_a() -> [u8; 32] { [7u8; 32] }
 
     fn setup(n_in: usize, n_and: usize, depth: usize, k: usize)
@@ -539,7 +568,7 @@ mod tests {
         let g = gb.leaf_gate[li];
         let path = merkle_path(&hs, li);
 
-        let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li], &path, &gb.gate_of_wire);
+        let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li], &path, &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
         assert_eq!(v, 0, "honest leaf must acquit");
 
         for mutate_t in [true, false] {
@@ -548,14 +577,14 @@ mod tests {
             let hs2: Vec<_> = hs.iter().cloned().enumerate()
                 .map(|(i, h)| if i == li { leaf_hash_of(&c, g, bad.0, bad.1) } else { h }).collect();
             let (v, _) = phi_settle_v2(&c, &seed, &plan, merkle_root(&hs2), li, g, bad,
-                                       &merkle_path(&hs2, li), &gb.gate_of_wire);
+                                       &merkle_path(&hs2, li), &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
             assert_eq!(v, 1, "corrupt leaf must convict (table={mutate_t})");
         }
 
-        let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li], &[], &gb.gate_of_wire);
+        let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li], &[], &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
         assert_eq!(v, 0, "bad path must acquit");
         let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, c.gates.len() + 5, gb.leaves[li],
-                                   &path, &gb.gate_of_wire);
+                                   &path, &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
         assert_eq!(v, 0, "out-of-range gate must acquit");
     }
 
@@ -570,14 +599,14 @@ mod tests {
         let g = gb.leaf_gate[li];
 
         let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li],
-                                   &merkle_path(&hs, li), &gb.gate_of_wire);
+                                   &merkle_path(&hs, li), &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
         assert_eq!(v, 0, "honest XOR-anchor leaf must acquit");
 
         let bad = (gb.leaves[li].0, gb.leaves[li].1 ^ &S::one());
         let hs2: Vec<_> = hs.iter().cloned().enumerate()
             .map(|(i, h)| if i == li { leaf_hash_of(&c, g, bad.0, bad.1) } else { h }).collect();
         let (v, _) = phi_settle_v2(&c, &seed, &plan, merkle_root(&hs2), li, g, bad,
-                                   &merkle_path(&hs2, li), &gb.gate_of_wire);
+                                   &merkle_path(&hs2, li), &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
         assert_eq!(v, 1, "corrupt XOR-anchor offset must convict");
     }
 
@@ -679,7 +708,7 @@ mod tests {
         for li in [0usize, hs.len() / 2, hs.len() - 1] {
             let g = gb.leaf_gate[li];
             let (v, st) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li],
-                                        &merkle_path(&hs, li), &gb.gate_of_wire);
+                                        &merkle_path(&hs, li), &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
             assert_eq!(v, 0, "honest leaf {li} must acquit");
             if li == hs.len() / 2 {
                 println!("AES-128 contested gate {g}: anchors={} xor_nodes={}",
@@ -689,7 +718,7 @@ mod tests {
             let hs2: Vec<_> = hs.iter().cloned().enumerate()
                 .map(|(i, h)| if i == li { leaf_hash_of(&c, g, bad.0, bad.1) } else { h }).collect();
             let (v, _) = phi_settle_v2(&c, &seed, &plan, merkle_root(&hs2), li, g, bad,
-                                       &merkle_path(&hs2, li), &gb.gate_of_wire);
+                                       &merkle_path(&hs2, li), &gb.gate_of_wire, &seed_commit(&seed, &DEC), &DEC);
             assert_eq!(v, 1, "corrupt leaf {li} must convict");
         }
     }
@@ -926,6 +955,53 @@ mod tests {
             assert_eq!(a_str, a_ref, "anchors_touched disagree at K={k}");
             assert_eq!(x_str, x_ref, "xor_nodes_visited disagree at K={k}");
         }
+    }
+
+    /// t18: the seed-opening check (spec §5), the one inverted verdict.
+    ///
+    /// Every structural failure acquits (0, accuser slashed) EXCEPT a seed that
+    /// fails to open its commitment, which convicts (1, garbler slashed),
+    /// because the seed is garbler-posted data. Without this check a garbler
+    /// who posts a wrong seed makes every honest leaf look mis-garbled and the
+    /// accuser is slashed for reporting a real cheat.
+    #[test]
+    fn t18_seed_opening() {
+        let (c, seed, plan, gb) = setup(64, 200, 3, K);
+        let (hs, root) = commit(&c, &gb);
+        let li = 0usize;
+        let g = gb.leaf_gate[li];
+        let path = merkle_path(&hs, li);
+        let com = seed_commit(&seed, &DEC);
+
+        // honest seed and decommitment: the predicate proceeds and acquits
+        let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li],
+                                   &path, &gb.gate_of_wire, &com, &DEC);
+        assert_eq!(v, 0, "honest seed opening must proceed and acquit");
+
+        // wrong seed: does not open the commitment -> CONVICT
+        let mut bad_seed = seed;
+        bad_seed[0] ^= 1;
+        let (v, _) = phi_settle_v2(&c, &bad_seed, &plan, root, li, g, gb.leaves[li],
+                                   &path, &gb.gate_of_wire, &com, &DEC);
+        assert_eq!(v, 1, "a seed that does not open its commitment must convict");
+
+        // wrong decommitment: also fails to open -> CONVICT
+        let mut bad_dec = DEC;
+        bad_dec[31] ^= 0xff;
+        let (v, _) = phi_settle_v2(&c, &seed, &plan, root, li, g, gb.leaves[li],
+                                   &path, &gb.gate_of_wire, &com, &bad_dec);
+        assert_eq!(v, 1, "a bad decommitment must convict");
+
+        // the check precedes every structural test: a bad seed convicts even
+        // when the witness is also structurally broken, which would otherwise
+        // acquit at 0
+        let (v, _) = phi_settle_v2(&c, &bad_seed, &plan, root, li, c.gates.len() + 5,
+                                   gb.leaves[li], &[], &gb.gate_of_wire, &com, &DEC);
+        assert_eq!(v, 1, "seed opening is checked before structural failures");
+
+        // and the commitment is binding: a different seed cannot open it
+        assert_ne!(seed_commit(&bad_seed, &DEC), com);
+        assert_ne!(seed_commit(&seed, &bad_dec), com);
     }
 
     /// t17: setup cost, before vs after anchoring, on real Bristol circuits.
