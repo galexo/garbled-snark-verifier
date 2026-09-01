@@ -37,7 +37,7 @@ const PROMOTED: u32 = 0x100;
 /// derivable from the seed with no ancestry. That is what makes a window sound:
 /// nothing at the boundary is fabricated.
 const BOUNDARY: u32 = 0x200;
-const DESC_OFF: usize = 96;
+const DESC_OFF: usize = 104;
 const T_XOR: u32 = 8;
 const T_XNOR: u32 = 9;
 const T_NOT: u32 = 10;
@@ -102,6 +102,7 @@ fn main() {
     // the other windows' roots. In production these are the real window roots,
     // fixed at setup, and the global root is the topology commitment.
     let n_windows = argn(&args, "--windows", 1024);
+    let core_hi_g = arg(&args, "--core-hi").and_then(|v| v.parse::<u32>().ok()).unwrap_or(u32::MAX);
     let win_index = argn(&args, "--win-index", 0);
     let wit_path = arg(&args, "--witness").cloned().unwrap_or_else(|| "witness_real.hex".into());
 
@@ -339,6 +340,8 @@ fn main() {
     rom.extend_from_slice(&n_bnd.to_be_bytes());             // N_BND
     rom.extend_from_slice(&(win_index as u32).to_be_bytes());// WIN_INDEX
     rom.extend_from_slice(&(depth as u32).to_be_bytes());    // LOCAL_DEPTH
+    rom.extend_from_slice(&core_lo_g.to_be_bytes());         // CORE_LO
+    rom.extend_from_slice(&core_hi_g.to_be_bytes());         // CORE_HI
     assert_eq!(rom.len(), DESC_OFF);
     for (i, &(ty, wa, wb)) in desc.iter().enumerate() {
         let t = ty | if promoted[i] { PROMOTED } else { 0 };
@@ -391,7 +394,8 @@ fn main() {
     }
     let wh = sha(&[&rom]);
     println!("corrupt={corrupt}  EXPECT Halt({exp})");
-    println!("window start {skip} core_lo {core_lo_g} boundary {n_bnd}");
+    println!("window start {skip} core [{core_lo_g}, {}) boundary {n_bnd}",
+             if core_hi_g == u32::MAX { skip + ng as u32 } else { core_hi_g });
     println!("WINDOW_HASH {}", wh.iter().map(|b| format!("{b:02x}")).collect::<String>());
     println!("LEAF_OF_CONTESTED {}", leaf_of(&tg, &rg).iter().map(|b| format!("{b:02x}")).collect::<String>());
 }
