@@ -32,7 +32,12 @@ const TAG_XANCH: u8 = 0x05;
 const TAG_SEEDCOM: u8 = 0x07;
 const INPUT_FLAG: u32 = 0x8000_0000;
 const PROMOTED: u32 = 0x100;
-const DESC_OFF: usize = 80;
+/// A pseudo-gate standing for a wire produced BEFORE this window. Its wa field
+/// holds the producing gate's GLOBAL index, so its label is anchor(global) --
+/// derivable from the seed with no ancestry. That is what makes a window sound:
+/// nothing at the boundary is fabricated.
+const BOUNDARY: u32 = 0x200;
+const DESC_OFF: usize = 96;
 const T_XOR: u32 = 8;
 const T_XNOR: u32 = 9;
 const T_NOT: u32 = 10;
@@ -91,6 +96,13 @@ fn main() {
     let want_gate = arg(&args, "--gate").and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
     let corrupt = arg(&args, "--corrupt").cloned().unwrap_or_else(|| "none".into());
     let rom_path = arg(&args, "--rom").cloned().unwrap_or_else(|| "anchor_rom_real.bin".into());
+    let bnd_path = arg(&args, "--boundary").cloned().unwrap_or_default();
+    let core_lo_g = arg(&args, "--core-lo").and_then(|v| v.parse::<u32>().ok()).unwrap_or(skip);
+    // Window tree: this window's local root is one leaf; the rest stand in for
+    // the other windows' roots. In production these are the real window roots,
+    // fixed at setup, and the global root is the topology commitment.
+    let n_windows = argn(&args, "--windows", 1024);
+    let win_index = argn(&args, "--win-index", 0);
     let wit_path = arg(&args, "--witness").cloned().unwrap_or_else(|| "witness_real.hex".into());
 
     let raw = fs::read(topo).expect("read topo");
@@ -109,24 +121,49 @@ fn main() {
             if s & INPUT_FLAG != 0 { base_inputs = base_inputs.max((s & !INPUT_FLAG) + 1); }
         }
     }
+    // Pre-window references become BOUNDARY pseudo-gates appended after the real
+    // ones, each carrying the producing gate's global index. Under anchoring a
+    // non-free gate's output label is anchor(g) from the seed alone, so such a
+    // reference is derivable; a FREE one is not, and means the window is too
+    // small to be sound.
+    let mut btype: HashMap<u32, u32> = HashMap::new();
+    if !bnd_path.is_empty() {
+        let b = fs::read(&bnd_path).expect("read boundary");
+        for i in 0..b.len() / 8 {
+            let g = u32::from_le_bytes([b[8*i], b[8*i+1], b[8*i+2], b[8*i+3]]);
+            let t = u32::from_le_bytes([b[8*i+4], b[8*i+5], b[8*i+6], b[8*i+7]]);
+            btype.insert(g, t);
+        }
+    }
     let mut extern_map: HashMap<u32, u32> = HashMap::new();
     for i in 0..ng {
         for o in [4, 8] {
             let s = rd(i, o);
             if s & INPUT_FLAG == 0 && s < skip && !extern_map.contains_key(&s) {
-                let n = base_inputs + extern_map.len() as u32;
+                let n = extern_map.len() as u32;
                 extern_map.insert(s, n);
             }
         }
     }
-    let nin = base_inputs + extern_map.len() as u32;
+    let nin = base_inputs;
+    let n_bnd = extern_map.len() as u32;
+    // Boundary pseudo-gates come FIRST: they are inputs to the window, so their
+    // labels must exist before any real gate reads them. Real gate i therefore
+    // sits at descriptor index n_bnd + i and has global index skip + i.
     let w_of = |s: u32| -> u32 {
         if s & INPUT_FLAG != 0 { s & !INPUT_FLAG }
-        else if s < skip { extern_map[&s] }
-        else { nin + (s - skip) }
+        else if s < skip { nin + extern_map[&s] }
+        else { nin + n_bnd + (s - skip) }
     };
-    let desc: Vec<(u32, u32, u32)> =
-        (0..ng).map(|i| (rd(i, 0), w_of(rd(i, 4)), w_of(rd(i, 8)))).collect();
+    let mut bslots: Vec<(u32, u32)> = extern_map.iter().map(|(g, n)| (*n, *g)).collect();
+    bslots.sort_unstable();
+    let mut desc: Vec<(u32, u32, u32)> =
+        bslots.iter().map(|(_, g)| (BOUNDARY, *g, 0)).collect();
+    desc.extend((0..ng).map(|i| (rd(i, 0), w_of(rd(i, 4)), w_of(rd(i, 8)))));
+    let n_free_bnd = bslots.iter()
+        .filter(|(_, g)| btype.get(g).map_or(true, |t| is_free(*t)))
+        .count();
+    let ng = ng + n_bnd as usize;
 
     // ---- K-bounding, with supports dropped at each wire's last use so memory
     // tracks the live set rather than the whole circuit.
@@ -134,6 +171,7 @@ fn main() {
     if k > 0 {
         let mut last_use: HashMap<u32, usize> = HashMap::new();
         for (g, &(ty, wa, wb)) in desc.iter().enumerate() {
+            if ty & BOUNDARY != 0 { continue; }
             last_use.insert(wa, g);
             if ty != T_NOT { last_use.insert(wb, g); }
         }
@@ -142,7 +180,8 @@ fn main() {
         let empty: Vec<u32> = Vec::new();
         for (g, &(ty, wa, wb)) in desc.iter().enumerate() {
             let out = nin + g as u32;
-            if is_free(ty) {
+            if ty & BOUNDARY != 0 { supp.insert(out, vec![out]); }
+            else if is_free(ty) {
                 let sa = supp.get(&wa).unwrap_or(&empty);
                 let sb = if ty == T_NOT { &empty } else { supp.get(&wb).unwrap_or(&empty) };
                 // sorted merge, aborting as soon as the union exceeds K
@@ -199,7 +238,14 @@ fn main() {
     };
 
     for (gi, &(ty, wa, wb)) in desc.iter().enumerate() {
-        let g = gi as u32;
+        // anchors are tagged with the GLOBAL gate index, so a gate garbles
+        // identically no matter which window it is disputed in
+        let g = skip + (gi as u32).saturating_sub(n_bnd);
+        if ty & BOUNDARY != 0 {
+            lbl.push(prf16(&seed, TAG_ANCHOR, wa));   // wa holds the global index
+            leaves.push(filler);
+            continue;
+        }
         if promoted[gi] {
             lbl.push(prf16(&seed, TAG_XANCH, g)); leaves.push(filler);
         } else if ty == T_XOR {
@@ -217,7 +263,7 @@ fn main() {
     }
 
     // ---- contested gate
-    let gsel: usize = if want_gate >= 0 { want_gate as usize }
+    let gsel: usize = if want_gate >= 0 { want_gate as usize + n_bnd as usize }
         else if corrupt == "freegate" {
             desc.iter().enumerate().position(|(i, d)| is_free(d.0) && !promoted[i]).expect("no free gate")
         } else {
@@ -228,8 +274,8 @@ fn main() {
     while (1usize << depth) < ng { depth += 1; }
 
     let (ty, wa, wb) = desc[gsel];
-    let (mut tg, mut rg) = if !is_free(ty) && !promoted[gsel] {
-        half_gate(&lbl, ty, wa, wb, gsel as u32)
+    let (mut tg, mut rg) = if ty & BOUNDARY == 0 && !is_free(ty) && !promoted[gsel] {
+        half_gate(&lbl, ty, wa, wb, skip + (gsel as u32 - n_bnd))
     } else { ([0u8; 16], [0u8; 16]) };
 
     // a cheating GARBLER commits the wrong table, so the corruption enters the
@@ -254,6 +300,26 @@ fn main() {
     let mut path = Vec::with_capacity(depth * NODE);
     { let mut idx = gsel;
       for d in 0..depth { path.extend_from_slice(&levels[d][idx ^ 1]); idx >>= 1; } }
+
+    // ---- window tree: bind this window's root into a global topology root
+    let mut wlev = 0usize;
+    while (1usize << wlev) < n_windows.max(2) { wlev += 1; }
+    let mut wleaves: Vec<[u8; NODE]> = (0..(1usize << wlev)).map(|i| {
+        let d = sha(&[b"win", &(i as u32).to_le_bytes()]);
+        let mut o = [0u8; NODE]; o.copy_from_slice(&d[..NODE]); o
+    }).collect();
+    wleaves[win_index] = root;
+    let mut wlevels: Vec<Vec<[u8; NODE]>> = vec![wleaves];
+    for d in 0..wlev {
+        let prev = &wlevels[d];
+        let mut nxt = Vec::with_capacity(prev.len() / 2);
+        for i in (0..prev.len()).step_by(2) { nxt.push(node_of(&prev[i], &prev[i + 1])); }
+        wlevels.push(nxt);
+    }
+    let global_root = wlevels[wlev][0];
+    { let mut idx = win_index;
+      for d in 0..wlev { path.extend_from_slice(&wlevels[d][idx ^ 1]); idx >>= 1; } }
+    let total_depth = depth + wlev;
     if corrupt == "path" { path[0] ^= 1; }
 
     let mut wseed = seed; let mut wdec = dec;
@@ -265,10 +331,14 @@ fn main() {
     let mut rom = Vec::with_capacity(DESC_OFF + ng * 12);
     rom.extend_from_slice(&nin.to_be_bytes());
     rom.extend_from_slice(&(ng as u32).to_be_bytes());
-    rom.extend_from_slice(&(depth as u32).to_be_bytes());
+    rom.extend_from_slice(&(total_depth as u32).to_be_bytes());
     rom.extend_from_slice(&(DESC_OFF as u32).to_be_bytes());
-    rom.extend_from_slice(&root); rom.extend_from_slice(&[0u8; 32 - NODE]);
+    rom.extend_from_slice(&global_root); rom.extend_from_slice(&[0u8; 32 - NODE]);
     rom.extend_from_slice(&com_seed);
+    rom.extend_from_slice(&skip.to_be_bytes());              // WIN_START
+    rom.extend_from_slice(&n_bnd.to_be_bytes());             // N_BND
+    rom.extend_from_slice(&(win_index as u32).to_be_bytes());// WIN_INDEX
+    rom.extend_from_slice(&(depth as u32).to_be_bytes());    // LOCAL_DEPTH
     assert_eq!(rom.len(), DESC_OFF);
     for (i, &(ty, wa, wb)) in desc.iter().enumerate() {
         let t = ty | if promoted[i] { PROMOTED } else { 0 };
@@ -289,8 +359,39 @@ fn main() {
         "none" => 0, "path" | "freegate" => 2, _ => 1,
     };
     println!("gates {ng} inputs {nin} leaves {n_leaf} depth {depth}");
-    println!("{rom_path}: {} bytes   root {}", rom.len(),
-             root.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!("{rom_path}: {} bytes   window root {}   GLOBAL root {}", rom.len(),
+             root.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+             global_root.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!("depth: local {depth} + window {wlev} = {total_depth}  ({n_windows} windows)");
     println!("{wit_path}: {} bytes   contested gate {gsel} (type {ty})", wit.len());
+    // The global check ("are all boundary refs non-free") is too strict: most
+    // boundary refs belong to gates near the window's start that no contested
+    // walk reaches. What matters is whether THIS dispute's walk touches a free
+    // boundary, whose label is not derivable from the seed.
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut stk = vec![desc[gsel].1, desc[gsel].2];
+        let mut bad = 0usize;
+        while let Some(cur) = stk.pop() {
+            if !seen.insert(cur) { continue; }
+            if cur < nin { continue; }
+            let di = (cur - nin) as usize;
+            if di >= desc.len() { continue; }
+            let (t, a, b) = desc[di];
+            if t & BOUNDARY != 0 {
+                if btype.get(&a).map_or(true, |x| is_free(*x)) { bad += 1; }
+                continue;
+            }
+            if !is_free(t) || promoted[di] { continue; }
+            stk.push(a);
+            if t != T_NOT { stk.push(b); }
+        }
+        println!("boundary refs {n_bnd} ({n_free_bnd} free); this walk touches {bad} free boundary refs -> {}",
+                 if bad == 0 { "SOUND" } else { "UNSOUND, widen the window" });
+    }
+    let wh = sha(&[&rom]);
     println!("corrupt={corrupt}  EXPECT Halt({exp})");
+    println!("window start {skip} core_lo {core_lo_g} boundary {n_bnd}");
+    println!("WINDOW_HASH {}", wh.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!("LEAF_OF_CONTESTED {}", leaf_of(&tg, &rg).iter().map(|b| format!("{b:02x}")).collect::<String>());
 }

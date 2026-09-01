@@ -59,30 +59,53 @@ pub struct TopoStats {
 #[derive(Debug)]
 pub struct TopoExportMode<W: Write + Send> {
     storage: Storage<WireId, Option<bool>>,
-    /// wire id -> encoded source (INPUT_FLAG|idx, or gate index)
-    src: HashMap<WireId, u32>,
+    /// wire id -> (encoded source: INPUT_FLAG|idx or gate index, gate type)
+    src: HashMap<WireId, (u32, u32)>,
+    /// gates produced BEFORE the window but referenced inside it, with their
+    /// type. A window is only sound if every such reference is derivable
+    /// without its own ancestry -- which, under anchoring, means it must be a
+    /// non-free gate, whose output label is anchor(global g) from the seed
+    /// alone. A free boundary reference means the window is too small.
+    boundary: HashMap<u32, u32>,
     next_input: u32,
     gate_index: u64,
     limit: u64,
     skip: u64,
     out: W,
+    boundary_path: String,
     pub stats: TopoStats,
     handle: Arc<Mutex<TopoStats>>,
 }
 
 impl<W: Write + Send> TopoExportMode<W> {
-    pub fn new(capacity: usize, limit: u64, skip: u64, out: W, handle: Arc<Mutex<TopoStats>>) -> Self {
+    pub fn new(capacity: usize, limit: u64, skip: u64, out: W, boundary_path: String,
+               handle: Arc<Mutex<TopoStats>>) -> Self {
         Self {
             storage: Storage::new(capacity),
             src: HashMap::new(),
+            boundary: HashMap::new(),
             next_input: 0,
             gate_index: 0,
             limit,
             skip,
             out,
+            boundary_path,
             stats: TopoStats::default(),
             handle,
         }
+    }
+
+    /// (global gate index, type) for every pre-window reference, little-endian.
+    fn write_boundary(&self) {
+        if self.boundary_path.is_empty() { return; }
+        let mut v: Vec<(u32, u32)> = self.boundary.iter().map(|(a, b)| (*a, *b)).collect();
+        v.sort_unstable();
+        let mut buf = Vec::with_capacity(v.len() * 8);
+        for (g, t) in v {
+            buf.extend_from_slice(&g.to_le_bytes());
+            buf.extend_from_slice(&t.to_le_bytes());
+        }
+        std::fs::write(&self.boundary_path, &buf).expect("write boundary");
     }
 
     fn publish(&self) {
@@ -92,14 +115,23 @@ impl<W: Write + Send> TopoExportMode<W> {
     }
 
     /// A wire no gate has produced is a circuit input; give it the next index.
+    /// Records a boundary entry when the producing gate predates the window.
     fn source_of(&mut self, w: WireId) -> u32 {
-        if let Some(s) = self.src.get(&w) {
-            return *s;
+        if let Some(&(s, ty)) = self.src.get(&w) {
+            // Only references made from INSIDE the window are boundary refs.
+            // Without the gate_index guard the entire skip phase qualifies --
+            // every gate there reads inputs produced below skip -- and the
+            // table becomes the whole prefix (measured: 1.6 GB) instead of the
+            // window's edge.
+            if s & INPUT_FLAG == 0 && (s as u64) < self.skip && self.gate_index >= self.skip {
+                self.boundary.insert(s, ty);
+            }
+            return s;
         }
         let s = INPUT_FLAG | self.next_input;
         self.next_input += 1;
         self.stats.inputs += 1;
-        self.src.insert(w, s);
+        self.src.insert(w, (s, u32::MAX));
         s
     }
 }
@@ -145,7 +177,7 @@ impl<W: Write + Send + std::fmt::Debug> CircuitMode for TopoExportMode<W> {
         }
 
         // this gate now produces wire_c; later gates referencing it resolve here
-        self.src.insert(gate.wire_c, g as u32);
+        self.src.insert(gate.wire_c, (g as u32, ty));
         self.feed_wire(gate.wire_c, false);
 
         if self.gate_index % (1 << 20) == 0 {
@@ -159,7 +191,9 @@ impl<W: Write + Send + std::fmt::Debug> CircuitMode for TopoExportMode<W> {
         if self.gate_index >= self.skip + self.limit {
             self.out.flush().expect("flush");
             self.publish();
-            eprintln!("  [topo_export] limit {} reached", self.limit);
+            self.write_boundary();
+            eprintln!("  [topo_export] limit {} reached, {} boundary refs",
+                      self.limit, self.boundary.len());
             std::process::exit(0);
         }
     }

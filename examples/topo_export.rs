@@ -19,6 +19,10 @@ use ark_ec::AffineRepr;
 
 const K_CONSTRAINTS: usize = 6;
 
+fn arg_s(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
 fn arg(args: &[String], name: &str, default: usize) -> usize {
     args.iter().position(|a| a == name)
         .and_then(|i| args.get(i + 1))
@@ -52,7 +56,8 @@ fn main() {
 
     let handle = Arc::new(Mutex::new(TopoStats::default()));
     let w = BufWriter::with_capacity(1 << 22, File::create(&out_path).expect("create"));
-    let mode = TopoExportMode::new(capacity, limit, skip, w, handle.clone());
+    let bpath = arg_s(&args, "--boundary").unwrap_or_default();
+    let mode = TopoExportMode::new(capacity, limit, skip, w, bpath, handle.clone());
 
     let t = std::time::Instant::now();
     let _r: StreamingResult<_, _, bool> =
