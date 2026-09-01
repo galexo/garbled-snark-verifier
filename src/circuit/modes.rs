@@ -4,9 +4,11 @@ use crate::{Gate, WireId, storage::Credits};
 
 mod anchor_stats_mode;
 mod component_stats_mode;
+mod topo_export_mode;
 mod execute_mode;
 pub use anchor_stats_mode::{AnchorStats, AnchorStatsMode};
 pub use component_stats_mode::{ComponentStats, ComponentStatsMode};
+pub use topo_export_mode::{TopoExportMode, TopoStats, INPUT_FLAG};
 pub use execute_mode::{ExecuteMode, OptionalBoolean};
 // Back-compat alias used widely in tests/gadgets
 pub type Execute = crate::circuit::StreamingMode<ExecuteMode>;
