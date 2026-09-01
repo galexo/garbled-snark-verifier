@@ -264,7 +264,15 @@ fn main() {
     }
 
     // ---- contested gate
-    let gsel: usize = if want_gate >= 0 { want_gate as usize + n_bnd as usize }
+    // --corrupt freegate must win over --gate: otherwise an explicit --gate
+    // silently disputes a non-free gate, the run acquits, and the case looks
+    // like a predicate failure when it is only a harness one.
+    let gsel: usize = if corrupt == "freegate" {
+            desc.iter().enumerate()
+                .position(|(i, d)| d.0 & BOUNDARY == 0 && is_free(d.0) && !promoted[i]
+                          && skip + (i as u32).saturating_sub(n_bnd) >= core_lo_g)
+                .expect("no free gate in core")
+        } else if want_gate >= 0 { want_gate as usize + n_bnd as usize }
         else if corrupt == "freegate" {
             desc.iter().enumerate().position(|(i, d)| is_free(d.0) && !promoted[i]).expect("no free gate")
         } else {
