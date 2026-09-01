@@ -37,6 +37,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let k = arg(&args, "--k", 1024);
     let capacity = arg(&args, "--capacity", 160_000);
+    let limit = arg(&args, "--limit", 0) as u64;
 
     eprintln!("E4: anchor statistics on the Groth16 verifier, K = {k}");
 
@@ -63,7 +64,7 @@ fn main() {
     let t = std::time::Instant::now();
     let result: StreamingResult<AnchorStatsMode, _, bool> = CircuitBuilder::run_streaming(
         verify,
-        AnchorStatsMode::new(capacity, k, handle.clone()),
+        { let mut m = AnchorStatsMode::new(capacity, k, handle.clone()); m.gate_limit = limit; m },
         garbled_groth16::verify,
     );
     let elapsed = t.elapsed();

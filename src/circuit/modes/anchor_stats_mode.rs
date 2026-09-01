@@ -86,6 +86,9 @@ pub struct AnchorStatsMode {
     gate_index: u64,
     next_input_id: u64,
     pub stats: AnchorStats,
+    /// stop after this many gates (0 = no limit), so a prefix of a
+    /// settlement-scale circuit can be measured in bounded time
+    pub gate_limit: u64,
     /// shared so the caller can read the result: `run_streaming` consumes the mode
     handle: Arc<Mutex<AnchorStats>>,
 }
@@ -99,6 +102,7 @@ impl AnchorStatsMode {
             gate_index: 0,
             next_input_id: 1 << 62, // input anchors live above gate ids
             stats: AnchorStats::default(),
+            gate_limit: 0,
             handle,
         }
     }
@@ -190,8 +194,19 @@ impl CircuitMode for AnchorStatsMode {
         }
         self.feed_wire(gate.wire_c, eval(&gate.gate_type, a, b));
         self.anc.insert(gate.wire_c, out);
-        if self.gate_index % (1 << 20) == 0 {
+        if self.gate_index % (1 << 22) == 0 {
             self.publish();
+            eprintln!(
+                "  [anchor_stats] {} gates free={} nonfree={} promoted={} anc_live={} max_anchors={} max_xor={} support={}",
+                self.gate_index, self.stats.free_gates, self.stats.nonfree_gates,
+                self.stats.promoted, self.anc.len(), self.stats.max_anchors,
+                self.stats.max_xor_nodes, self.stats.max_support
+            );
+        }
+        if self.gate_limit != 0 && self.gate_index >= self.gate_limit {
+            self.publish();
+            eprintln!("  [anchor_stats] gate limit {} reached", self.gate_limit);
+            std::process::exit(0);
         }
     }
 
