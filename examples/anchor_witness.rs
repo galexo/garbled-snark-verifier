@@ -69,6 +69,32 @@ fn leaf_of(t: &[u8; 16], r: &[u8; 16]) -> [u8; NODE] {
     let mut o = [0u8; NODE]; o.copy_from_slice(&d[..NODE]); o
 }
 
+fn leaf32(b: &[u8]) -> [u8; 32] { sha(&[b]) }
+
+fn node32(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] { sha(&[l, r]) }
+
+/// Perfect tree over `leaves`, returned as levels; depth is ceil(log2(n)).
+fn tree32(mut leaves: Vec<[u8; 32]>) -> (Vec<Vec<[u8; 32]>>, usize) {
+    let mut depth = 1usize;
+    while (1usize << depth) < leaves.len().max(2) { depth += 1; }
+    let pad = leaves.first().copied().unwrap_or([0u8; 32]);
+    leaves.resize(1usize << depth, pad);
+    let mut lv = vec![leaves];
+    for d in 0..depth {
+        let prev = &lv[d];
+        let mut nxt = Vec::with_capacity(prev.len() / 2);
+        for i in (0..prev.len()).step_by(2) { nxt.push(node32(&prev[i], &prev[i + 1])); }
+        lv.push(nxt);
+    }
+    (lv, depth)
+}
+
+fn path32(lv: &[Vec<[u8; 32]>], depth: usize, mut idx: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(depth * 32);
+    for d in 0..depth { out.extend_from_slice(&lv[d][idx ^ 1]); idx >>= 1; }
+    out
+}
+
 fn node_of(l: &[u8; NODE], r: &[u8; NODE]) -> [u8; NODE] {
     let d = sha(&[l, r]);
     let mut o = [0u8; NODE]; o.copy_from_slice(&d[..NODE]); o
@@ -103,6 +129,13 @@ fn main() {
     // fixed at setup, and the global root is the topology commitment.
     let n_windows = argn(&args, "--windows", 1024);
     let core_hi_g = arg(&args, "--core-hi").and_then(|v| v.parse::<u32>().ok()).unwrap_or(u32::MAX);
+    // Emit a REAL SP1 AnchorInput: the descriptors this dispute's walk actually
+    // reads, with real Merkle openings against a real topology root, and the
+    // real global anchor ids it bottoms out at. The existing SP1 harness builds
+    // all of this from leaf_bytes(tag, i) -- correct shape and counts, synthetic
+    // content -- which measures cost but cannot be called a measurement of the
+    // verifier.
+    let sp1_out = arg(&args, "--sp1-out").cloned().unwrap_or_default();
     let win_index = argn(&args, "--win-index", 0);
     let wit_path = arg(&args, "--witness").cloned().unwrap_or_else(|| "witness_real.hex".into());
 
@@ -295,6 +328,7 @@ fn main() {
 
     // ---- Merkle tree
     let mut levels: Vec<Vec<[u8; NODE]>> = Vec::with_capacity(depth + 1);
+    let leaves_kept = leaves.clone();
     let mut cur = leaves;
     cur.resize(1usize << depth, filler);
     levels.push(cur);
@@ -400,6 +434,101 @@ fn main() {
         println!("boundary refs {n_bnd} ({n_free_bnd} free); this walk touches {bad} free boundary refs -> {}",
                  if bad == 0 { "SOUND" } else { "UNSOUND, widen the window" });
     }
+    // ---- real SP1 input
+    if !sp1_out.is_empty() {
+        // walk the contested gate exactly as the predicate does, recording the
+        // descriptors read and the anchors it bottoms out at
+        let mut seen = std::collections::HashSet::new();
+        let mut reads: Vec<usize> = Vec::new();
+        let mut anchor_ids: Vec<u64> = Vec::new();
+        let mut stk = vec![desc[gsel].1, desc[gsel].2];
+        while let Some(cur) = stk.pop() {
+            if !seen.insert(cur) { continue; }
+            if cur < nin { anchor_ids.push(cur as u64); continue; }
+            let di = (cur - nin) as usize;
+            if di >= desc.len() { continue; }
+            reads.push(di);
+            let (t, a, b) = desc[di];
+            if t & BOUNDARY != 0 { anchor_ids.push(a as u64); continue; }
+            if !is_free(t) || promoted[di] {
+                anchor_ids.push((skip + (di as u32).saturating_sub(n_bnd)) as u64);
+                continue;
+            }
+            stk.push(a);
+            if t != T_NOT { stk.push(b); }
+        }
+        reads.sort_unstable();
+
+        // topology tree over this window's real descriptors, then the window
+        // tree, so total depth matches the settlement instance the same way the
+        // leaf tree does (local + window levels)
+        let tleaves: Vec<[u8; 32]> = desc.iter().map(|&(t, a, b)| {
+            let mut r = [0u8; 12];
+            r[0..4].copy_from_slice(&t.to_le_bytes());
+            r[4..8].copy_from_slice(&a.to_le_bytes());
+            r[8..12].copy_from_slice(&b.to_le_bytes());
+            leaf32(&r)
+        }).collect();
+        let (tlv, tdepth) = tree32(tleaves);
+        let twin: Vec<[u8; 32]> = (0..(1usize << wlev)).map(|i| {
+            if i == win_index { tlv[tdepth][0] } else { sha(&[b"topowin", &(i as u32).to_le_bytes()]) }
+        }).collect();
+        let (twlv, twdepth) = tree32(twin);
+        let topo_root = twlv[twdepth][0];
+        let topo_depth = tdepth + twdepth;
+        let win_suffix = path32(&twlv, twdepth, win_index);
+
+        let mut topo_leaves = Vec::with_capacity(reads.len() * 32);
+        let mut topo_paths = Vec::with_capacity(reads.len() * topo_depth * 32);
+        let mut topo_idx = Vec::with_capacity(reads.len());
+        for &di in &reads {
+            topo_leaves.extend_from_slice(&tlv[0][di]);
+            let mut p = path32(&tlv, tdepth, di);
+            p.extend_from_slice(&win_suffix);
+            topo_paths.extend_from_slice(&p);
+            topo_idx.push(((win_index as u64) << tdepth) | di as u64);
+        }
+
+        // the contested leaf, committed with full-width nodes for this backend
+        let l32: Vec<[u8; 32]> = leaves_kept.iter().map(|l| leaf32(l)).collect();
+        let (llv, ldepth) = tree32(l32);
+        let lwin: Vec<[u8; 32]> = (0..(1usize << wlev)).map(|i| {
+            if i == win_index { llv[ldepth][0] } else { sha(&[b"leafwin", &(i as u32).to_le_bytes()]) }
+        }).collect();
+        let (lwlv, lwdepth) = tree32(lwin);
+        let mut leaf_path = path32(&llv, ldepth, gsel);
+        leaf_path.extend_from_slice(&path32(&lwlv, lwdepth, win_index));
+
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let nums = |v: &[u64]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+        let q = '"';
+        let mut j = String::new();
+        j.push_str("{\n");
+        j.push_str(&format!("  {q}seed{q}: {q}{}{q},\n", hex(&seed)));
+        j.push_str(&format!("  {q}anchor_ids{q}: [{}],\n", nums(&anchor_ids)));
+        j.push_str(&format!("  {q}topo_depth{q}: {topo_depth},\n"));
+        j.push_str(&format!("  {q}topo_root{q}: {q}{}{q},\n", hex(&topo_root)));
+        j.push_str(&format!("  {q}topo_leaves{q}: {q}{}{q},\n", hex(&topo_leaves)));
+        j.push_str(&format!("  {q}topo_idx{q}: [{}],\n", nums(&topo_idx)));
+        j.push_str(&format!("  {q}topo_paths{q}: {q}{}{q},\n", hex(&topo_paths)));
+        j.push_str(&format!("  {q}leaf_depth{q}: {},\n", ldepth + lwdepth));
+        j.push_str(&format!("  {q}leaf_root{q}: {q}{}{q},\n", hex(&lwlv[lwdepth][0])));
+        j.push_str(&format!("  {q}leaf_hash{q}: {q}{}{q},\n", hex(&leaf32(&leaves_kept[gsel]))));
+        j.push_str(&format!("  {q}leaf_idx{q}: {},\n", ((win_index as u64) << ldepth) | gsel as u64));
+        j.push_str(&format!("  {q}leaf_path{q}: {q}{}{q},\n", hex(&leaf_path)));
+        j.push_str(&format!("  {q}circuit{q}: {q}BitVM Groth16 verifier{q},\n"));
+        j.push_str(&format!("  {q}window_start{q}: {skip},\n"));
+        j.push_str(&format!("  {q}contested_global_gate{q}: {},\n",
+                            skip + (gsel as u32).saturating_sub(n_bnd)));
+        j.push_str(&format!("  {q}K{q}: {k},\n"));
+        j.push_str(&format!("  {q}descriptors_read{q}: {},\n", reads.len()));
+        j.push_str(&format!("  {q}anchors{q}: {}\n", anchor_ids.len()));
+        j.push_str("}\n");
+        fs::write(&sp1_out, j).unwrap();
+        println!("sp1 input {sp1_out}: {} descriptors read, {} anchors, topo_depth {topo_depth}, leaf_depth {}",
+                 reads.len(), anchor_ids.len(), ldepth + lwdepth);
+    }
+
     let wh = sha(&[&rom]);
     println!("corrupt={corrupt}  EXPECT Halt({exp})");
     println!("window start {skip} core [{core_lo_g}, {}) boundary {n_bnd}",
